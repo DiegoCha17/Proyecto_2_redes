@@ -1,0 +1,13 @@
+# Dependencias Python del Proyecto 2 - NetAgent-IA
+# Versiones verificadas sobre Python 3.14.10 / Fedora Linux 43.
+#
+# Instalación (con el entorno virtual activo):
+#   python3 -m pip install -r requirements.txt
+#
+# Ansible no se instala por pip en este proyecto: se usa ansible-core del
+# sistema (dnf) y las colecciones de ansible-galaxy. Ver README.md.
+
+netmiko==4.8.0
+openai==2.24.0
+python-dotenv==1.2.2
+PyYAML==6.0.3

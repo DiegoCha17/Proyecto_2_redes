@@ -1,0 +1,25 @@
+# --- Secretos (NUNCA versionar) ---
+.env
+.env.*
+!.env.example
+
+# --- Entorno virtual de Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- Registros de sesión (evidencia local, no se versiona) ---
+registros/*
+!registros/.gitkeep
+
+# --- Ansible ---
+*.retry
+.ansible/
+ansible/inventario.ini.bak
+
+# --- Editores ---
+.vscode/
+.idea/
+*.swp

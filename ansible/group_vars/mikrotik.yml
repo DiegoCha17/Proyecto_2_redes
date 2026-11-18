@@ -1,0 +1,26 @@
+---
+# =============================================================================
+# Variables comunes a los MikroTik del laboratorio (R1 y SW1).
+#
+# Las credenciales NO se escriben aquí: se resuelven en tiempo de ejecución
+# desde el entorno, usando el prefijo declarado por host en inventario.ini
+# (prefijo_env=NETAGENT_R1 / NETAGENT_SW1).
+#
+# Antes de ejecutar un playbook, exporte las variables del archivo .env:
+#   set -a; . ./.env; set +a
+# o use:  source scripts/activar_entorno.sh
+# =============================================================================
+
+ansible_connection: ansible.netcommon.network_cli
+ansible_network_os: community.routeros.routeros
+ansible_user: "{{ lookup('env', prefijo_env ~ '_USUARIO') }}"
+ansible_password: "{{ lookup('env', prefijo_env ~ '_CLAVE') }}"
+ansible_become: false
+
+# Tiempos de espera propios de RouterOS sobre SSH en GNS3.
+ansible_command_timeout: 45
+ansible_connect_timeout: 30
+
+# Solo se permite leer y modificar configuración mediante los playbooks
+# autorizados del proyecto; no se habilitan comandos arbitrarios.
+ansible_network_cli_ssh_type: paramiko

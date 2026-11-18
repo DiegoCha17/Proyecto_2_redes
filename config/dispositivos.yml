@@ -1,0 +1,68 @@
+# =============================================================================
+# Inventario lógico del laboratorio - Proyecto 2, Grupo 6
+#
+# ÚNICA fuente de verdad para:
+#   * hosts y roles de la topología,
+#   * catálogo cerrado de interfaces modificables,
+#   * política de bloqueo de direcciones IP.
+#
+# Las credenciales NO se guardan aquí: viven en .env (ver .env.example).
+# El inventario de Ansible (ansible/inventario.ini) se genera desde este
+# archivo con: python3 scripts/generar_inventario.py
+# =============================================================================
+
+# --- Datos de la topología simulada en GNS3 ---------------------------------
+laboratorio:
+  red_gestion: "10.60.30.0/24"        # red de administración (tap de GNS3)
+  red_lan: "192.168.10.0/24"
+  red_wan_simulada: "172.16.100.0/24"
+  gateway_lan: "192.168.10.1"
+  gateway_wan: "172.16.100.1"
+  servidor_wan: "172.16.100.10"
+  hosts_lan:
+    pc1: "192.168.10.50"
+    pc2: "192.168.10.60"
+
+# --- Dispositivos administrables por NetAgent-IA ----------------------------
+# prefijo_env: prefijo de las variables de entorno con las credenciales,
+#              p. ej. NETAGENT_R1 -> NETAGENT_R1_USUARIO / NETAGENT_R1_CLAVE.
+dispositivos:
+  r1:
+    nombre: "R1"
+    rol: "router"
+    descripcion: "Router MikroTik de borde: LAN 192.168.10.0/24 y WAN simulada 172.16.100.0/24"
+    host: "10.60.30.202"
+    plataforma: "mikrotik_routeros"
+    prefijo_env: "NETAGENT_R1"
+    puerto_ssh: 22
+    grupo_ansible: "mikrotik"
+    # Catálogo cerrado de interfaces cuyo comentario puede modificarse.
+    # Solo ether4 para la demostración de la Etapa 2; se amplía aquí, nunca en
+    # el código, tras validar los nombres reales con estado_interfaces.py.
+    # Cualquier interfaz ausente de esta lista es rechazada (falla cerrada).
+    interfaces_autorizadas:
+      - "ether4"
+
+  sw1:
+    nombre: "SW1"
+    rol: "switch"
+    descripcion: "Switch MikroTik de acceso para PC1 y PC2"
+    host: "10.60.30.204"
+    plataforma: "mikrotik_routeros"
+    prefijo_env: "NETAGENT_SW1"
+    puerto_ssh: 22
+    grupo_ansible: "mikrotik"
+    interfaces_autorizadas: []
+
+# --- Política de bloqueo (usada por gestionar_bloqueo.yml y el agente) ------
+politica_bloqueo:
+  # Catálogo cerrado: solo se pueden bloquear/permitir IPs de estas redes.
+  redes_permitidas:
+    - "192.168.10.0/24"
+  # Infraestructura: nunca puede bloquearse.
+  ips_protegidas:
+    - "192.168.10.1"      # gateway LAN (R1)
+    - "172.16.100.1"      # gateway WAN simulada (R1)
+    - "10.60.30.202"      # R1 - gestión
+    - "10.60.30.204"      # SW1 - gestión
+    - "172.16.100.10"     # Servidor-WAN

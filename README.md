@@ -3,11 +3,9 @@
 Agente de IA que administra una topología MikroTik simulada en GNS3 mediante un
 catálogo cerrado de herramientas, aprobación humana y verificación posterior.
 
-> **Estado actual: Etapas 1 y 2 completadas (pruebas con mocks)** — entorno
-> verificado y ambas herramientas implementadas: consulta de interfaces y
-> actualización de comentario con confirmación explícita y verificación
-> posterior. No se ejecutó ningún cambio real en R1 ni SW1. Faltan la prueba de
-> integración, los playbooks Ansible (Etapa 3) y el agente (Etapa 4).
+> **Estado actual:** el agente y dos herramientas Python están implementados.
+> Ollama local es el proveedor predeterminado; OpenAI sigue disponible. Los
+> playbooks Ansible de bloqueo y su integración están pendientes.
 
 ---
 
@@ -46,8 +44,9 @@ P2_Final_Grupo6/
 │   └── dispositivos.yml       Inventario lógico, catálogo de interfaces y
 │                              política de bloqueo (sin credenciales)
 │
-├── agente/                    (Etapa 4) agente OpenAI con function calling
-│   └── __init__.py
+├── agente/                    Agente con function calling y catálogo cerrado
+│   ├── catalogo.py, politicas.py, planificador.py, ejecutar.py
+│   └── interpretar.py, cerebro.py
 │
 ├── herramientas/              (Etapa 2) herramientas Python del catálogo
 │   ├── __init__.py
@@ -209,7 +208,7 @@ python -m pip install -r requirements.txt   # opcional: ya están disponibles
 # 2) Credenciales y API key (nunca se versionan)
 cp .env.example .env
 chmod 600 .env
-$EDITOR .env        # completar NETAGENT_R1_*, NETAGENT_SW1_* y OPENAI_API_KEY
+$EDITOR .env        # completar NETAGENT_R1_* y NETAGENT_SW1_*
 
 # 3) Inventario de Ansible derivado del YAML
 python scripts/generar_inventario.py
@@ -226,6 +225,72 @@ Para trabajar en una shell con todo cargado:
 ```bash
 source scripts/activar_entorno.sh
 ```
+
+### Proveedor de IA y ejecución del agente
+
+Con Ollama ejecutándose en el host y el modelo `qwen3:4b` ya disponible, el
+proveedor predeterminado es local. Se puede iniciar con:
+
+```bash
+source .venv/bin/activate
+NETAGENT_PROVEEDOR=ollama NETAGENT_MODELO=qwen3:4b python main.py
+```
+
+La URL predeterminada es `http://127.0.0.1:11434/v1`; puede cambiarse con
+`NETAGENT_OLLAMA_BASE_URL`. El SDK recibe un identificador local no secreto,
+por lo que Ollama no requiere `OPENAI_API_KEY`. El agente solicita desactivar
+el razonamiento con `reasoning_effort=none` y añade `/no_think` al mensaje para
+Qwen. Si aparece `</think>` en el contenido, descarta el texto previo; un
+`<think>` sin cerrar se rechaza. La disponibilidad de estos controles depende de
+la versión y del modelo. El catálogo y la confirmación de escrituras se
+aplican igual con ambos proveedores.
+
+Para Ollama se usa por defecto `NETAGENT_OLLAMA_TIMEOUT=120` segundos de
+espera de red por solicitud, sin reintentos automáticos del SDK, y
+`NETAGENT_OLLAMA_MAX_TOKENS=1024` como límite de salida por respuesta. Ambos
+son configurables en `.env` o en el entorno. El timeout es de inactividad de
+red, no un límite global de toda la sesión; un turno puede incluir varias
+solicitudes al modelo. El límite de tokens también incluye llamadas a
+herramientas: si la respuesta se trunca, el agente informa el error y no
+ejecuta esa propuesta. Antes de repetir tras cualquier error, revise el estado
+del equipo; una operación anterior podría haberse ejecutado. OpenAI conserva
+sus valores originales del SDK.
+
+En la instalación auditada, los metadatos de `qwen3:4b` anunciaban solo
+pensamiento activado y la plantilla añadía `<think>` al iniciar la respuesta.
+Por ello `reasoning_effort=none` y `/no_think` no garantizan que se suprima el
+razonamiento; el límite y el filtrado siguen siendo necesarios. Una prueba local
+de propuesta, sin ejecutar herramientas, completó con 579 tokens, pero otras
+peticiones pueden necesitar un límite o tiempo diferente.
+
+Para seleccionar OpenAI, establezca `NETAGENT_PROVEEDOR=openai` y configure
+`OPENAI_API_KEY` en el entorno o `.env`. El modelo por defecto es `gpt-4o-mini`;
+`NETAGENT_MODELO` permite seleccionar otro. Un `NETAGENT_MODELO` existente
+en el entorno o `.env` prevalece sobre el modelo por defecto de cada proveedor:
+al cambiar de proveedor, actualícelo o elimine esa asignación. Las variables
+ya exportadas tienen prioridad sobre `.env`. OpenAI puede generar cargos.
+
+Para lecturas, el agente envía al modelo un resultado JSON limitado al equipo,
+los nombres y estados de las interfaces y el comentario de R1/ether4 cuando es
+seguro transmitirlo. No incluye IP, credenciales ni detalles internos de error.
+El modelo puede responder, proponer otra lectura o solicitar el cambio autorizado.
+La consola muestra además el resultado detallado de cada lectura al operador;
+los datos adicionales no se incorporan al historial enviado al modelo.
+`NETAGENT_MAX_HERRAMIENTAS` limita las llamadas por solicitud (por defecto 6),
+independientemente de `NETAGENT_MAX_PASOS`, que limita mensajes por sesión.
+Toda escritura requiere un diagnóstico previo real del equipo en la misma
+solicitud. Si el modelo propone escribir primero, el agente realiza una lectura
+y devuelve el diagnóstico para que el modelo vuelva a decidir. Si el comentario
+ya coincide, no escribe; en caso contrario muestra los valores anterior y nuevo
+y requiere aprobación explícita. Después de ejecutar, una segunda lectura
+independiente confirma el resultado. El límite reserva espacio para la escritura
+y su verificación; una falla se informa como estado incierto. Solo R1/ether4
+admite cambios y no hay integración de los playbooks Ansible todavía.
+
+Para una demostración supervisada, solicite por ejemplo `Cambia el comentario
+de ether4 de R1 a P2-NetAgent-IA-Demo`, revise la vista previa y responda `s`
+solo si autoriza ese cambio; `n` lo cancela. Si ya coincide no se pregunta ni
+se modifica. Las lecturas y escrituras reales requieren las credenciales SSH.
 
 ### Lectura del resultado
 
@@ -394,15 +459,78 @@ escritura → relectura, la detección de rechazos de RouterOS, el recorte de
 
 ### Etapa 3 — Playbooks Ansible (`ansible/`)
 
-* `consultar_bloqueo.yml` — lectura de reglas de bloqueo en R1.
+* `consultar_bloqueo.yml` — consulta de solo lectura de reglas de R1 con el
+  comentario exacto `NetAgent-IA:CU02:PC1-WAN`. La consulta informa las reglas
+  administradas, su cadena, acción, direcciones y estado habilitado. Considera
+  configurado el bloqueo cuando existe una regla habilitada `forward/drop` para
+  PC1 `192.168.10.50` y servidor WAN `172.16.100.10` (direcciones individuales
+  o `/32`). La lectura no comprueba condiciones adicionales ni el orden de las
+  reglas: `bloqueo_efectivo` permanece `null` y no prueba que el tráfico esté
+  efectivamente bloqueado. La respuesta incompleta o de formato desconocido
+  hace fallar la consulta, sin indicar falsamente que no existe una regla.
+  La lectura de propiedades completas añade `regla_administrada_valida`,
+  `propiedades_inesperadas`, `reglas_duplicadas` y `segura_para_modificar`.
+  Solo una regla única con el identificador y los parámetros exactos, sin
+  propiedades adicionales desconocidas ni indicadores anómalos, puede marcarse
+  como segura. El formato anterior de lectura conserva sus campos, pero no
+  acredita inspección completa y nunca habilita la administración. El campo
+  histórico `bloqueo_configurado` compara los parámetros básicos; para decidir
+  un futuro cambio hay que consultar también `segura_para_modificar`.
 * `gestionar_bloqueo.yml` — alta/baja de bloqueos sobre IPs validadas por la
   política, sin reglas duplicadas y con verificación posterior.
 
-### Etapa 4 — Agente (`agente/`)
+Con las variables de credenciales ya disponibles en el entorno y R1 accesible,
+desde la raíz del repositorio se puede ejecutar la consulta manual:
 
-* Function calling con OpenAI sobre el catálogo cerrado de herramientas.
-* Consulta previa, propuesta, aprobación humana obligatoria, ejecución y
-  verificación; respuestas y registros en JSON.
+```bash
+ANSIBLE_CONFIG=ansible/ansible.cfg ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook ansible/consultar_bloqueo.yml
+```
+
+Se requiere el callback `ansible.posix.json`, de la colección `ansible.posix`.
+Su salida es un documento JSON con eventos de Ansible; el objeto filtrado
+`netagent_resultado` aparece en la tarea `Resultado JSON de NetAgent-IA` para
+`r1`. El callback no entrega el objeto directamente: para conectarlo al agente
+hará falta un adaptador que compruebe el código de salida, extraiga y valide ese
+objeto y gestione los errores sin reenviar resultados internos ni credenciales.
+La herramienta de lectura `consultar_bloqueo` ya está disponible en el catálogo
+para `r1`. El adaptador ejecuta únicamente el playbook de consulta, usa el
+inventario generado, limita el destino a R1 y filtra el resultado antes de
+enviarlo al modelo. No se ha integrado ninguna herramienta de cambio de firewall.
+
+Para iniciar el agente con el entorno habitual y solicitar una lectura:
+
+```bash
+source scripts/activar_entorno.sh
+python main.py
+```
+
+En `NetAgent>` se puede pedir: `Consulta la regla de bloqueo de PC1 hacia el
+servidor WAN en R1`. La lectura utiliza SSH; ejecutarla únicamente cuando el
+laboratorio esté disponible. No demuestra que el tráfico esté bloqueado.
+
+El contrato preparatorio de autorización de CU-02 está en
+`agente/autorizacion_cu02.py`; aún no está conectado al agente ni ejecuta
+Ansible. El futuro controlador debe validar y mostrar una propuesta inmutable
+con herramienta, operación, equipo, origen y destino; únicamente tras un `sí`
+explícito del operador creará la aprobación en memoria. Antes de invocar el
+adaptador, comparará la acción completa con esa aprobación y rechazará cualquier
+diferencia. El LLM no recibe la aprobación ni controla la función de confirmación.
+Este es un límite de confianza dentro del proceso, no una credencial ni una
+protección frente a código local que pueda fabricar objetos o invocar Ansible
+directamente. El adaptador deberá aceptar únicamente llamadas del controlador y
+mantener protegidas las credenciales y el acceso al proceso.
+
+Para R7, el controlador deberá registrar cronológicamente diagnóstico filtrado,
+propuesta y parámetros, decisión del operador, ejecución y verificación
+independiente, usando el registro de sesión existente y sin guardar secretos.
+La integración, la comprobación contra el estado inmediatamente antes del
+cambio y las garantías frente a cambios concurrentes siguen pendientes.
+
+### Agente (`agente/`)
+
+* Implementados: function calling sobre el catálogo, planificación, aprobación
+  de escrituras, ejecución y registro JSON.
+* Pendiente: integración de los playbooks Ansible y pruebas de extremo a extremo.
 
 ### Pendientes conocidos
 

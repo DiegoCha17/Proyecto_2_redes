@@ -36,6 +36,8 @@ DIRECTORIO_REGISTROS = RAIZ_PROYECTO / "registros"
 # --- Valores por defecto ------------------------------------------------------
 PLATAFORMAS_SOPORTADAS = frozenset({"mikrotik_routeros"})
 MODELO_POR_DEFECTO = "gpt-4o-mini"
+MODELO_OLLAMA_POR_DEFECTO = "qwen3:4b"
+URL_OLLAMA_POR_DEFECTO = "http://127.0.0.1:11434/v1"
 MAX_PASOS_POR_DEFECTO = 12
 
 
@@ -142,6 +144,11 @@ class Ajustes:
     max_pasos: int
     requiere_aprobacion: bool
     ruta_env: Path
+    proveedor_ia: str = "ollama"
+    ollama_base_url: str = URL_OLLAMA_POR_DEFECTO
+    max_herramientas_por_solicitud: int = 6
+    ollama_timeout: int = 120
+    ollama_max_tokens: int = 1024
 
     def dispositivo(self, clave: str) -> Dispositivo:
         """Devuelve un dispositivo por su clave o lanza error si no existe."""
@@ -180,7 +187,7 @@ class Ajustes:
             for nombre in (dispositivo.usuario_env, dispositivo.clave_env):
                 if not os.environ.get(nombre):
                     faltantes.append(nombre)
-        if not os.environ.get("OPENAI_API_KEY"):
+        if self.proveedor_ia == "openai" and not os.environ.get("OPENAI_API_KEY", "").strip():
             faltantes.append("OPENAI_API_KEY")
         return faltantes
 
@@ -356,7 +363,12 @@ def cargar_ajustes(
 
     politica = _construir_politica(datos.get("politica_bloqueo"))
 
-    modelo = os.environ.get("NETAGENT_MODELO", "").strip() or MODELO_POR_DEFECTO
+    proveedor = os.environ.get("NETAGENT_PROVEEDOR", "ollama").strip().lower()
+    if proveedor not in {"ollama", "openai"}:
+        raise ErrorConfiguracion("NETAGENT_PROVEEDOR debe ser ollama u openai")
+    modelo_defecto = MODELO_OLLAMA_POR_DEFECTO if proveedor == "ollama" else MODELO_POR_DEFECTO
+    modelo = os.environ.get("NETAGENT_MODELO", "").strip() or modelo_defecto
+    ollama_base_url = os.environ.get("NETAGENT_OLLAMA_BASE_URL", "").strip() or URL_OLLAMA_POR_DEFECTO
 
     return Ajustes(
         laboratorio=dict(laboratorio),
@@ -366,6 +378,13 @@ def cargar_ajustes(
         max_pasos=_entero_entorno("NETAGENT_MAX_PASOS", MAX_PASOS_POR_DEFECTO, 1, 50),
         requiere_aprobacion=_booleano_entorno("NETAGENT_REQUIERE_APROBACION", True),
         ruta_env=ruta_env,
+        proveedor_ia=proveedor,
+        ollama_base_url=ollama_base_url,
+        max_herramientas_por_solicitud=_entero_entorno(
+            "NETAGENT_MAX_HERRAMIENTAS", 6, 1, 50
+        ),
+        ollama_timeout=_entero_entorno("NETAGENT_OLLAMA_TIMEOUT", 120, 1, 3600),
+        ollama_max_tokens=_entero_entorno("NETAGENT_OLLAMA_MAX_TOKENS", 1024, 64, 4096),
     )
 
 

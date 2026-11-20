@@ -30,6 +30,7 @@ from config.ajustes import Ajustes
 from herramientas.actualizar_comentario import actualizar_comentario
 from herramientas.comun import ErrorHerramienta
 from herramientas.estado_interfaces import consultar
+from agente.consulta_ansible import consultar_bloqueo as _consultar_bloqueo
 
 # --- Riesgo de una herramienta ----------------------------------------------
 # Solo las de riesgo "escritura" exigen aprobación humana explícita.
@@ -39,6 +40,7 @@ RIESGOS = frozenset({RIESGO_LECTURA, RIESGO_ESCRITURA})
 
 # --- Nombres estables del catálogo ------------------------------------------
 CONSULTAR_INTERFACES = "consultar_interfaces"
+CONSULTAR_BLOQUEO = "consultar_bloqueo"
 ACTUALIZAR_COMENTARIO = "actualizar_comentario"
 
 
@@ -266,6 +268,16 @@ def catalogo_por_defecto() -> Catalogo:
     """
     return Catalogo(
         [
+            Herramienta(
+                definicion=DefinicionHerramienta(
+                    nombre=CONSULTAR_BLOQUEO,
+                    descripcion="Consulta en R1 la regla configurada para PC1 hacia WAN; no demuestra el bloqueo efectivo y no modifica el firewall.",
+                    riesgo=RIESGO_LECTURA,
+                    parametros={"equipo": {"type": "string", "description": "Únicamente r1"}},
+                    obligatorios=("equipo",),
+                ),
+                funcion=_consultar_bloqueo,
+            ),
             Herramienta(
                 definicion=DefinicionHerramienta(
                     nombre=CONSULTAR_INTERFACES,

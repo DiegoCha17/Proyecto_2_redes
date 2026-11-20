@@ -6,7 +6,7 @@ Inicia con:
     python main.py
 
 El programa carga la configuración central (``config/ajustes.py`` + ``.env``),
-comprueba que exista la clave del proveedor de IA y abre una conversación en
+comprueba la configuración del proveedor de IA y abre una conversación en
 español. Cada modificación se muestra como vista previa y solo se ejecuta si la
 persona responde que sí en la terminal; ``/salir`` cierra la sesión.
 
@@ -44,7 +44,7 @@ def banner(ajustes: Ajustes) -> str:
     lineas = [
         "",
         "NetAgent-IA — asistente de configuración del laboratorio MikroTik",
-        f"Modelo: {ajustes.modelo}    Pasos por sesión: {ajustes.max_pasos}",
+        f"Proveedor: {ajustes.proveedor_ia}    Modelo: {ajustes.modelo}    Pasos por sesión: {ajustes.max_pasos}",
         "",
         "Equipos autorizados:",
     ]

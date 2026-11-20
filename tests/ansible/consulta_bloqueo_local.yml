@@ -1,0 +1,17 @@
+---
+- name: Probar procesamiento sin conexiones de red
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Simular salida de RouterOS
+      ansible.builtin.set_fact:
+        netagent_consulta:
+          stdout: ["{{ salida_simulada }}"]
+      no_log: true
+    - name: Ejecutar el procesamiento real
+      ansible.builtin.include_tasks: ../../ansible/tareas/procesar_bloqueo.yml
+      no_log: true
+    - name: Resultado JSON de NetAgent-IA
+      ansible.builtin.debug:
+        var: netagent_resultado

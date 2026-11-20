@@ -459,9 +459,72 @@ escritura → relectura, la detección de rechazos de RouterOS, el recorte de
 
 ### Etapa 3 — Playbooks Ansible (`ansible/`)
 
-* `consultar_bloqueo.yml` — lectura de reglas de bloqueo en R1.
+* `consultar_bloqueo.yml` — consulta de solo lectura de reglas de R1 con el
+  comentario exacto `NetAgent-IA:CU02:PC1-WAN`. La consulta informa las reglas
+  administradas, su cadena, acción, direcciones y estado habilitado. Considera
+  configurado el bloqueo cuando existe una regla habilitada `forward/drop` para
+  PC1 `192.168.10.50` y servidor WAN `172.16.100.10` (direcciones individuales
+  o `/32`). La lectura no comprueba condiciones adicionales ni el orden de las
+  reglas: `bloqueo_efectivo` permanece `null` y no prueba que el tráfico esté
+  efectivamente bloqueado. La respuesta incompleta o de formato desconocido
+  hace fallar la consulta, sin indicar falsamente que no existe una regla.
+  La lectura de propiedades completas añade `regla_administrada_valida`,
+  `propiedades_inesperadas`, `reglas_duplicadas` y `segura_para_modificar`.
+  Solo una regla única con el identificador y los parámetros exactos, sin
+  propiedades adicionales desconocidas ni indicadores anómalos, puede marcarse
+  como segura. El formato anterior de lectura conserva sus campos, pero no
+  acredita inspección completa y nunca habilita la administración. El campo
+  histórico `bloqueo_configurado` compara los parámetros básicos; para decidir
+  un futuro cambio hay que consultar también `segura_para_modificar`.
 * `gestionar_bloqueo.yml` — alta/baja de bloqueos sobre IPs validadas por la
   política, sin reglas duplicadas y con verificación posterior.
+
+Con las variables de credenciales ya disponibles en el entorno y R1 accesible,
+desde la raíz del repositorio se puede ejecutar la consulta manual:
+
+```bash
+ANSIBLE_CONFIG=ansible/ansible.cfg ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook ansible/consultar_bloqueo.yml
+```
+
+Se requiere el callback `ansible.posix.json`, de la colección `ansible.posix`.
+Su salida es un documento JSON con eventos de Ansible; el objeto filtrado
+`netagent_resultado` aparece en la tarea `Resultado JSON de NetAgent-IA` para
+`r1`. El callback no entrega el objeto directamente: para conectarlo al agente
+hará falta un adaptador que compruebe el código de salida, extraiga y valide ese
+objeto y gestione los errores sin reenviar resultados internos ni credenciales.
+La herramienta de lectura `consultar_bloqueo` ya está disponible en el catálogo
+para `r1`. El adaptador ejecuta únicamente el playbook de consulta, usa el
+inventario generado, limita el destino a R1 y filtra el resultado antes de
+enviarlo al modelo. No se ha integrado ninguna herramienta de cambio de firewall.
+
+Para iniciar el agente con el entorno habitual y solicitar una lectura:
+
+```bash
+source scripts/activar_entorno.sh
+python main.py
+```
+
+En `NetAgent>` se puede pedir: `Consulta la regla de bloqueo de PC1 hacia el
+servidor WAN en R1`. La lectura utiliza SSH; ejecutarla únicamente cuando el
+laboratorio esté disponible. No demuestra que el tráfico esté bloqueado.
+
+El contrato preparatorio de autorización de CU-02 está en
+`agente/autorizacion_cu02.py`; aún no está conectado al agente ni ejecuta
+Ansible. El futuro controlador debe validar y mostrar una propuesta inmutable
+con herramienta, operación, equipo, origen y destino; únicamente tras un `sí`
+explícito del operador creará la aprobación en memoria. Antes de invocar el
+adaptador, comparará la acción completa con esa aprobación y rechazará cualquier
+diferencia. El LLM no recibe la aprobación ni controla la función de confirmación.
+Este es un límite de confianza dentro del proceso, no una credencial ni una
+protección frente a código local que pueda fabricar objetos o invocar Ansible
+directamente. El adaptador deberá aceptar únicamente llamadas del controlador y
+mantener protegidas las credenciales y el acceso al proceso.
+
+Para R7, el controlador deberá registrar cronológicamente diagnóstico filtrado,
+propuesta y parámetros, decisión del operador, ejecución y verificación
+independiente, usando el registro de sesión existente y sin guardar secretos.
+La integración, la comprobación contra el estado inmediatamente antes del
+cambio y las garantías frente a cambios concurrentes siguen pendientes.
 
 ### Agente (`agente/`)
 

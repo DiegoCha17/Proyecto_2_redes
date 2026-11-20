@@ -1,0 +1,19 @@
+---
+- name: Consultar regla de NetAgent-IA en R1
+  hosts: r1
+  gather_facts: false
+  tasks:
+    - name: Leer únicamente reglas con el identificador del proyecto
+      community.routeros.command:
+        commands:
+          - ':put "NETAGENT_BEGIN_V1"; :foreach regla in=[/ip firewall filter print as-value where comment="NetAgent-IA:CU02:PC1-WAN"] do={ :put "NETAGENT_RULE_BEGIN_V2"; :foreach clave,valor in=$regla do={ :put ("NETAGENT_PROP|" . $clave . "|" . [:tostr $valor]) }; :put "NETAGENT_RULE_END_V2" }; :put "NETAGENT_END_V1"'
+      register: netagent_consulta
+      changed_when: false
+      no_log: true
+
+    - name: Procesar lectura sin exponer la salida original
+      ansible.builtin.include_tasks: tareas/procesar_bloqueo.yml
+
+    - name: Resultado JSON de NetAgent-IA
+      ansible.builtin.debug:
+        var: netagent_resultado

@@ -7,7 +7,7 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from agente.catalogo import (ACTUALIZAR_COMENTARIO, CONSULTAR_INTERFACES,
+from agente.catalogo import (ACTUALIZAR_COMENTARIO, CONSULTAR_INTERFACES, CONSULTAR_BLOQUEO,
                              Catalogo, Herramienta, catalogo_por_defecto)
 from agente.cerebro import Cerebro, RegistroSesion
 from agente.interpretar import LlamadaHerramienta, RespuestaModelo
@@ -88,6 +88,28 @@ class PruebaCicloLectura(unittest.TestCase):
         self.assertNotIn("comentario", tools[0]["content"])
         self.assertEqual([e["function"]["name"] for e in proveedor.esquemas[1]],
                          [CONSULTAR_INTERFACES, ACTUALIZAR_COMENTARIO])
+
+    def test_observa_consulta_firewall_sin_afirmar_bloqueo_efectivo(self):
+        salida = {'ok': True, 'equipo': 'R1', 'origen': '192.168.10.50',
+                  'destino': '172.16.100.10', 'bloqueo_configurado': False,
+                  'regla_administrada_existente': False, 'reglas_duplicadas': False,
+                  'segura_para_modificar': False, 'bloqueo_efectivo': None,
+                  'changed': False, 'error': None, 'dato_interno': 'no enviar'}
+        real = catalogo_por_defecto()
+        catalogo = Catalogo([Herramienta(real.obtener(CONSULTAR_BLOQUEO).definicion,
+                                         lambda **kwargs: salida)])
+        proveedor = ProveedorSimulado([
+            RespuestaModelo(llamadas=(LlamadaHerramienta(CONSULTAR_BLOQUEO, {'equipo': 'r1'}, 'id-fw'),)),
+            RespuestaModelo(texto='El tráfico está bloqueado.')])
+        cerebro = Cerebro(self.ajustes, proveedor=proveedor, catalogo=catalogo,
+                          salida=lambda _: None, registro=RegistroSesion(directorio=self.temporal.name))
+        resultado = cerebro.procesar('Consulta el bloqueo de PC1')
+        self.assertTrue(resultado.ok)
+        self.assertIn('bloqueo efectivo del tráfico no está verificado', resultado.texto)
+        self.assertNotIn('El tráfico está bloqueado.', resultado.texto)
+        tool = next(m for m in proveedor.peticiones[1] if m['role'] == 'tool')
+        self.assertEqual(tool['tool_call_id'], 'id-fw')
+        self.assertNotIn('dato_interno', tool['content'])
 
     def test_operador_conserva_detalle_y_modelo_solo_recibe_proyeccion(self):
         cerebro, proveedor = self.construir([llamada("r1", "id"), RespuestaModelo(texto="Listo")])

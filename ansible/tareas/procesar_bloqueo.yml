@@ -1,0 +1,33 @@
+---
+# Entrada: netagent_consulta.stdout[0]. Los marcadores evitan interpretar
+# respuestas incompletas o errores del equipo como ausencia de reglas.
+- name: Normalizar líneas de la consulta
+  ansible.builtin.set_fact:
+    netagent_lineas: "{{ netagent_consulta.stdout[0].splitlines() | map('trim') | reject('equalto', '') | list }}"
+  no_log: true
+
+- name: Validar marcadores únicos y final de respuesta
+  ansible.builtin.assert:
+    that:
+      - netagent_lineas | length >= 2
+      - netagent_lineas | select('equalto', 'NETAGENT_BEGIN_V1') | list | length == 1
+      - netagent_lineas | select('equalto', 'NETAGENT_END_V1') | list | length == 1
+      - netagent_lineas[-1] == 'NETAGENT_END_V1'
+    fail_msg: La consulta de firewall está incompleta o tiene formato inesperado.
+
+- name: Extraer bloque posterior al eco de la terminal
+  ansible.builtin.set_fact:
+    netagent_bloque: "{{ netagent_lineas[netagent_lineas.index('NETAGENT_BEGIN_V1') + 1:-1] }}"
+    netagent_prefijo: "{{ netagent_lineas[:netagent_lineas.index('NETAGENT_BEGIN_V1')] }}"
+  no_log: true
+
+- name: Rechazar líneas anteriores que no correspondan al eco observado
+  ansible.builtin.assert:
+    that:
+      - netagent_prefijo | reject('match', '^(<|:put )') | list | length == 0
+    fail_msg: La consulta de firewall contiene salida inesperada antes del bloque.
+
+- name: Construir resultado estructurado
+  ansible.builtin.set_fact:
+    netagent_resultado: "{{ netagent_bloque | netagent_procesar_bloqueo }}"
+  no_log: true

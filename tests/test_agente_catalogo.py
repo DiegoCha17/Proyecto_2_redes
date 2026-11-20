@@ -47,7 +47,7 @@ def definicion_falsa(
 class PruebaCatalogoPorDefecto(unittest.TestCase):
     def test_solo_declara_las_herramientas_autorizadas(self):
         catalogo = catalogo_por_defecto()
-        self.assertEqual(catalogo.nombres(), (CONSULTAR_INTERFACES, ACTUALIZAR_COMENTARIO))
+        self.assertEqual(set(catalogo.nombres()), {CONSULTAR_INTERFACES, ACTUALIZAR_COMENTARIO, "consultar_bloqueo"})
         self.assertEqual(catalogo.obtener(CONSULTAR_INTERFACES).riesgo, RIESGO_LECTURA)
         self.assertEqual(
             catalogo.obtener(ACTUALIZAR_COMENTARIO).riesgo, RIESGO_ESCRITURA

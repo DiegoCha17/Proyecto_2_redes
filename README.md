@@ -3,11 +3,9 @@
 Agente de IA que administra una topología MikroTik simulada en GNS3 mediante un
 catálogo cerrado de herramientas, aprobación humana y verificación posterior.
 
-> **Estado actual: Etapas 1 y 2 completadas (pruebas con mocks)** — entorno
-> verificado y ambas herramientas implementadas: consulta de interfaces y
-> actualización de comentario con confirmación explícita y verificación
-> posterior. No se ejecutó ningún cambio real en R1 ni SW1. Faltan la prueba de
-> integración, los playbooks Ansible (Etapa 3) y el agente (Etapa 4).
+> **Estado actual:** el agente y dos herramientas Python están implementados.
+> Ollama local es el proveedor predeterminado; OpenAI sigue disponible. Los
+> playbooks Ansible de bloqueo y su integración están pendientes.
 
 ---
 
@@ -46,8 +44,9 @@ P2_Final_Grupo6/
 │   └── dispositivos.yml       Inventario lógico, catálogo de interfaces y
 │                              política de bloqueo (sin credenciales)
 │
-├── agente/                    (Etapa 4) agente OpenAI con function calling
-│   └── __init__.py
+├── agente/                    Agente con function calling y catálogo cerrado
+│   ├── catalogo.py, politicas.py, planificador.py, ejecutar.py
+│   └── interpretar.py, cerebro.py
 │
 ├── herramientas/              (Etapa 2) herramientas Python del catálogo
 │   ├── __init__.py
@@ -209,7 +208,7 @@ python -m pip install -r requirements.txt   # opcional: ya están disponibles
 # 2) Credenciales y API key (nunca se versionan)
 cp .env.example .env
 chmod 600 .env
-$EDITOR .env        # completar NETAGENT_R1_*, NETAGENT_SW1_* y OPENAI_API_KEY
+$EDITOR .env        # completar NETAGENT_R1_* y NETAGENT_SW1_*
 
 # 3) Inventario de Ansible derivado del YAML
 python scripts/generar_inventario.py
@@ -226,6 +225,72 @@ Para trabajar en una shell con todo cargado:
 ```bash
 source scripts/activar_entorno.sh
 ```
+
+### Proveedor de IA y ejecución del agente
+
+Con Ollama ejecutándose en el host y el modelo `qwen3:4b` ya disponible, el
+proveedor predeterminado es local. Se puede iniciar con:
+
+```bash
+source .venv/bin/activate
+NETAGENT_PROVEEDOR=ollama NETAGENT_MODELO=qwen3:4b python main.py
+```
+
+La URL predeterminada es `http://127.0.0.1:11434/v1`; puede cambiarse con
+`NETAGENT_OLLAMA_BASE_URL`. El SDK recibe un identificador local no secreto,
+por lo que Ollama no requiere `OPENAI_API_KEY`. El agente solicita desactivar
+el razonamiento con `reasoning_effort=none` y añade `/no_think` al mensaje para
+Qwen. Si aparece `</think>` en el contenido, descarta el texto previo; un
+`<think>` sin cerrar se rechaza. La disponibilidad de estos controles depende de
+la versión y del modelo. El catálogo y la confirmación de escrituras se
+aplican igual con ambos proveedores.
+
+Para Ollama se usa por defecto `NETAGENT_OLLAMA_TIMEOUT=120` segundos de
+espera de red por solicitud, sin reintentos automáticos del SDK, y
+`NETAGENT_OLLAMA_MAX_TOKENS=1024` como límite de salida por respuesta. Ambos
+son configurables en `.env` o en el entorno. El timeout es de inactividad de
+red, no un límite global de toda la sesión; un turno puede incluir varias
+solicitudes al modelo. El límite de tokens también incluye llamadas a
+herramientas: si la respuesta se trunca, el agente informa el error y no
+ejecuta esa propuesta. Antes de repetir tras cualquier error, revise el estado
+del equipo; una operación anterior podría haberse ejecutado. OpenAI conserva
+sus valores originales del SDK.
+
+En la instalación auditada, los metadatos de `qwen3:4b` anunciaban solo
+pensamiento activado y la plantilla añadía `<think>` al iniciar la respuesta.
+Por ello `reasoning_effort=none` y `/no_think` no garantizan que se suprima el
+razonamiento; el límite y el filtrado siguen siendo necesarios. Una prueba local
+de propuesta, sin ejecutar herramientas, completó con 579 tokens, pero otras
+peticiones pueden necesitar un límite o tiempo diferente.
+
+Para seleccionar OpenAI, establezca `NETAGENT_PROVEEDOR=openai` y configure
+`OPENAI_API_KEY` en el entorno o `.env`. El modelo por defecto es `gpt-4o-mini`;
+`NETAGENT_MODELO` permite seleccionar otro. Un `NETAGENT_MODELO` existente
+en el entorno o `.env` prevalece sobre el modelo por defecto de cada proveedor:
+al cambiar de proveedor, actualícelo o elimine esa asignación. Las variables
+ya exportadas tienen prioridad sobre `.env`. OpenAI puede generar cargos.
+
+Para lecturas, el agente envía al modelo un resultado JSON limitado al equipo,
+los nombres y estados de las interfaces y el comentario de R1/ether4 cuando es
+seguro transmitirlo. No incluye IP, credenciales ni detalles internos de error.
+El modelo puede responder, proponer otra lectura o solicitar el cambio autorizado.
+La consola muestra además el resultado detallado de cada lectura al operador;
+los datos adicionales no se incorporan al historial enviado al modelo.
+`NETAGENT_MAX_HERRAMIENTAS` limita las llamadas por solicitud (por defecto 6),
+independientemente de `NETAGENT_MAX_PASOS`, que limita mensajes por sesión.
+Toda escritura requiere un diagnóstico previo real del equipo en la misma
+solicitud. Si el modelo propone escribir primero, el agente realiza una lectura
+y devuelve el diagnóstico para que el modelo vuelva a decidir. Si el comentario
+ya coincide, no escribe; en caso contrario muestra los valores anterior y nuevo
+y requiere aprobación explícita. Después de ejecutar, una segunda lectura
+independiente confirma el resultado. El límite reserva espacio para la escritura
+y su verificación; una falla se informa como estado incierto. Solo R1/ether4
+admite cambios y no hay integración de los playbooks Ansible todavía.
+
+Para una demostración supervisada, solicite por ejemplo `Cambia el comentario
+de ether4 de R1 a P2-NetAgent-IA-Demo`, revise la vista previa y responda `s`
+solo si autoriza ese cambio; `n` lo cancela. Si ya coincide no se pregunta ni
+se modifica. Las lecturas y escrituras reales requieren las credenciales SSH.
 
 ### Lectura del resultado
 
@@ -398,11 +463,11 @@ escritura → relectura, la detección de rechazos de RouterOS, el recorte de
 * `gestionar_bloqueo.yml` — alta/baja de bloqueos sobre IPs validadas por la
   política, sin reglas duplicadas y con verificación posterior.
 
-### Etapa 4 — Agente (`agente/`)
+### Agente (`agente/`)
 
-* Function calling con OpenAI sobre el catálogo cerrado de herramientas.
-* Consulta previa, propuesta, aprobación humana obligatoria, ejecución y
-  verificación; respuestas y registros en JSON.
+* Implementados: function calling sobre el catálogo, planificación, aprobación
+  de escrituras, ejecución y registro JSON.
+* Pendiente: integración de los playbooks Ansible y pruebas de extremo a extremo.
 
 ### Pendientes conocidos
 

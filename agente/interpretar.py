@@ -11,8 +11,8 @@ Seguridad:
     no hay herramientas libres ni comandos RouterOS en el mensaje del sistema.
   * La respuesta se valida entera: nombre de herramienta dentro del catálogo,
     argumentos con las claves y tipos declarados y como mucho una acción por paso.
-  * Nunca se envía configuración sensible: ni credenciales, ni variables de
-    entorno, ni direcciones IP de gestión, ni salidas técnicas de los equipos.
+  * La interfaz de historial permite al agente enviar resultados filtrados;
+    el agente es responsable de autorizar y minimizar esos datos.
   * Los errores del proveedor se traducen a :class:`ErrorProveedor` con un tipo
     estable y un mensaje que no reproduce el texto de la excepción (podría
     contener datos de la petición) ni la clave de API.
@@ -45,13 +45,22 @@ MENSAJE_SISTEMA = (
     "Reglas:\n"
     "1. Solo puedes proponer las herramientas del catálogo. No inventes "
     "comandos, herramientas ni propiedades que no estén declaradas.\n"
+    "Las claves de equipo del laboratorio son exactamente r1 y sw1, sin "
+    "guiones ni espacios; no conviertas R1 en r-1.\n"
     "2. Propón como máximo una herramienta por respuesta. Si faltan datos para "
     "usarla, pregunta al operador en vez de suponerlos.\n"
     "3. Las lecturas no modifican nada. Cualquier modificación requiere que una "
     "persona la apruebe después de ver una vista previa; tú no puedes aprobar, "
     "confirmar ni dar por hecha una modificación.\n"
+    "Cambiar el comentario autorizado es descriptivo: el estado down de la "
+    "interfaz no lo prohíbe. Tras un diagnóstico válido, si el operador pidió "
+    "un cambio permitido con todos sus datos, propón la herramienta del catálogo; "
+    "la aplicación mostrará la vista previa y solicitará la aprobación. "
+    "No omitas validaciones ni supongas que el cambio fue aprobado.\n"
     "4. No afirmes que un cambio se aplicó, ni inventes estados, direcciones, "
     "comentarios o resultados. Esa información solo la aportan las herramientas.\n"
+    "Si solicitan las interfaces de un estado, enumera todas las observadas con "
+    "ese estado y distingue down de disabled.\n"
     "5. Nunca reveles ni solicites credenciales, claves de API, variables de "
     "entorno, direcciones IP de gestión ni volcados técnicos de los equipos.\n"
     "6. Si piden algo fuera del catálogo (bloqueos de IP, reinicios, cambios de "
@@ -78,6 +87,7 @@ class LlamadaHerramienta:
 
     nombre: str
     argumentos: Mapping[str, Any]
+    id: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "argumentos", MappingProxyType(dict(self.argumentos)))
@@ -204,6 +214,12 @@ def convertir_respuesta(respuesta: Any) -> RespuestaModelo:
             "respuesta_invalida", "El proveedor no devolvió ninguna respuesta"
         )
 
+    if getattr(opciones[0], "finish_reason", None) == "length":
+        raise ErrorProveedor(
+            "respuesta_incompleta",
+            "La respuesta del modelo alcanzó el límite de salida y es incompleta. "
+            "Revise el estado antes de repetir; en Ollama puede aumentar NETAGENT_OLLAMA_MAX_TOKENS.",
+        )
     mensaje = getattr(opciones[0], "message", None)
     if mensaje is None:
         raise ErrorProveedor(
@@ -232,6 +248,7 @@ def convertir_respuesta(respuesta: Any) -> RespuestaModelo:
                 argumentos=_decodificar_argumentos(
                     getattr(funcion, "arguments", None)
                 ),
+                id=getattr(llamada, "id", "") or "",
             )
         )
 
@@ -253,12 +270,20 @@ class ProveedorOpenAI:
         api_key: str | None = None,
         base_url: str | None = None,
         temperatura: float = 0.0,
+        desactivar_razonamiento: bool = False,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         self._modelo = modelo
         self._cliente = cliente
         self._api_key = api_key
         self._base_url = base_url
         self._temperatura = temperatura
+        self._desactivar_razonamiento = desactivar_razonamiento
+        self._timeout = timeout
+        self._max_retries = max_retries
+        self._max_tokens = max_tokens
 
     @property
     def modelo(self) -> str:
@@ -280,6 +305,10 @@ class ProveedorOpenAI:
         parametros: dict[str, Any] = {"api_key": clave}
         if self._base_url:
             parametros["base_url"] = self._base_url
+        if self._timeout is not None:
+            parametros["timeout"] = self._timeout
+        if self._max_retries is not None:
+            parametros["max_retries"] = self._max_retries
 
         try:
             from openai import OpenAI  # importación diferida: acelera las pruebas
@@ -299,21 +328,46 @@ class ProveedorOpenAI:
         self, mensaje: str, herramientas: Sequence[Mapping[str, Any]]
     ) -> RespuestaModelo:
         """Envía el mensaje al modelo con el catálogo y normaliza la respuesta."""
+        mensajes = [
+            {"role": "system", "content": MENSAJE_SISTEMA},
+            {"role": "user", "content": (
+                f"{mensaje}\n/no_think" if self._desactivar_razonamiento else mensaje
+            )},
+        ]
+        return self.responder_historial(mensajes, herramientas)
+
+    def responder_historial(
+        self, mensajes: Sequence[Mapping[str, Any]], herramientas: Sequence[Mapping[str, Any]]
+    ) -> RespuestaModelo:
+        """Consulta con el historial OpenAI completo de una solicitud."""
         cliente = self._obtener_cliente()
         try:
+            opciones: dict[str, Any] = {}
+            if self._desactivar_razonamiento:
+                opciones["reasoning_effort"] = "none"
+            if self._max_tokens is not None:
+                opciones["max_tokens"] = self._max_tokens
             respuesta = cliente.chat.completions.create(
                 model=self._modelo,
-                messages=[
-                    {"role": "system", "content": MENSAJE_SISTEMA},
-                    {"role": "user", "content": mensaje},
-                ],
+                messages=list(mensajes),
                 tools=list(herramientas),
                 tool_choice="auto",
                 temperature=self._temperatura,
+                **opciones,
             )
         except Exception as exc:  # el SDK ya trae tipos; aquí se traducen
             raise _error_de_proveedor(exc) from exc
-        return convertir_respuesta(respuesta)
+        normalizada = convertir_respuesta(respuesta)
+        if self._desactivar_razonamiento:
+            # Algunas versiones devuelven el razonamiento en content, incluso
+            # sin la etiqueta de apertura. No lo mostramos ni lo registramos.
+            texto = normalizada.texto
+            if "</think>" in texto:
+                texto = texto.rsplit("</think>", 1)[1].strip()
+            if "<think>" in texto:
+                raise ErrorProveedor("respuesta_invalida", "El modelo devolvió razonamiento sin cerrar")
+            normalizada = RespuestaModelo(texto=texto, llamadas=normalizada.llamadas)
+        return normalizada
 
 
 def _a_intencion(respuesta: RespuestaModelo, catalogo: Catalogo) -> Intencion:
@@ -360,7 +414,18 @@ def interpretar(
     catalogo = catalogo or catalogo_por_defecto()
     if proveedor is None:
         ajustes = ajustes or obtener_ajustes()
-        proveedor = ProveedorOpenAI(modelo=ajustes.modelo)
+        proveedor = crear_proveedor(ajustes)
 
     respuesta = proveedor.responder(mensaje.strip(), catalogo.esquemas())
     return _a_intencion(respuesta, catalogo)
+
+
+def crear_proveedor(ajustes: Ajustes) -> ProveedorOpenAI:
+    """Construye el proveedor configurado para una solicitud."""
+    if ajustes.proveedor_ia == "ollama":
+        return ProveedorOpenAI(modelo=ajustes.modelo, api_key="ollama",
+                               base_url=ajustes.ollama_base_url,
+                               desactivar_razonamiento=True,
+                               timeout=ajustes.ollama_timeout, max_retries=0,
+                               max_tokens=ajustes.ollama_max_tokens)
+    return ProveedorOpenAI(modelo=ajustes.modelo)

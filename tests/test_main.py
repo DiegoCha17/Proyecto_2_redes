@@ -148,8 +148,8 @@ class PruebaArranque(unittest.TestCase):
 
     def test_sin_api_key_avisa_y_sale_con_error(self):
         buffer = io.StringIO()
-        with patch.dict(os.environ, {**ENTORNO_PRUEBA, "OPENAI_API_KEY": ""}):
-            with patch("builtins.input", side_effect=AssertionError("no debe pedir entrada")):
+        with patch.dict(os.environ, {**ENTORNO_PRUEBA, "NETAGENT_PROVEEDOR": "openai", "OPENAI_API_KEY": ""}):
+            with patch("main.obtener_ajustes", return_value=cargar_ajustes()), patch("builtins.input", side_effect=AssertionError("no debe pedir entrada")):
                 with redirect_stdout(buffer):
                     codigo = main()
 

@@ -72,6 +72,19 @@ class ProveedorFalso:
         return self.respuesta
 
 
+class ProveedorCambioFalso(ProveedorFalso):
+    """Repite la propuesta tras observar el diagnóstico, luego responde."""
+    def responder_historial(self, mensajes, herramientas):
+        self.llamadas.append(mensajes)
+        if mensajes[-1]["role"] == "user":
+            return self.respuesta
+        observacion = json.loads(mensajes[-1]["content"])
+        if observacion.get("ejecutada") is False:
+            llamada = self.respuesta.llamadas[0]
+            return RespuestaModelo(llamadas=(LlamadaHerramienta(llamada.nombre, llamada.argumentos, "cambio"),))
+        return RespuestaModelo(texto="Verificación recibida")
+
+
 class FuncionFalsa:
     """Herramienta simulada que registra sus invocaciones."""
 
@@ -115,13 +128,23 @@ class BaseCerebro(unittest.TestCase):
     def construir(self, respuesta, funciones, confirmar=None, ajustes=None):
         """Cerebro con proveedor y catálogo simulados y registro en un temporal."""
         real = catalogo_por_defecto()
+        funciones = dict(funciones)
+        es_cambio = bool(respuesta.llamadas and respuesta.llamadas[0].nombre == ACTUALIZAR_COMENTARIO)
+        if es_cambio and CONSULTAR_INTERFACES not in funciones:
+            def consultar_falsa(**kwargs):
+                datos = [dict(interfaz) for interfaz in LECTURA_OK["interfaces"]]
+                cambio = funciones[ACTUALIZAR_COMENTARIO]
+                if cambio.llamadas and cambio.error is None and cambio.salida.get("ok"):
+                    datos[1]["comentario"] = cambio.salida.get("comentario_solicitado", "")
+                return {**LECTURA_OK, "interfaces": datos}
+            funciones[CONSULTAR_INTERFACES] = consultar_falsa
         catalogo = Catalogo(
             [
                 Herramienta(definicion=real.obtener(nombre).definicion, funcion=funcion)
                 for nombre, funcion in funciones.items()
             ]
         )
-        self.proveedor = ProveedorFalso(respuesta)
+        self.proveedor = ProveedorCambioFalso(respuesta) if es_cambio else ProveedorFalso(respuesta)
         registro = RegistroSesion(
             directorio=self.directorio, modelo=self.ajustes.modelo
         )
@@ -204,9 +227,9 @@ class PruebaFlujoEscritura(BaseCerebro):
 
         self.assertEqual(respuesta.tipo, "modificacion")
         self.assertTrue(respuesta.ok)
-        self.assertIn("Listo:", respuesta.texto)
+        self.assertIn("quedó", respuesta.texto)
         self.assertIn(COMENTARIO_DEMO, respuesta.texto)
-        self.assertIn("La relectura de la interfaz coincide", respuesta.texto)
+        self.assertIn("lectura independiente", respuesta.texto)
         self.assertEqual(len(funcion.llamadas), 1)
         self.assertIs(funcion.llamadas[0]["confirmacion"], True)
         self.assertEqual(funcion.llamadas[0]["interfaz"], "ether4")
@@ -281,7 +304,7 @@ class PruebaFlujoEscritura(BaseCerebro):
         self.assertFalse(respuesta.ok)
         self.assertNotIn("Listo", respuesta.texto)
         self.assertIn("no se pudo confirmar", respuesta.texto)
-        self.assertIn("No se informa como aplicado", respuesta.texto)
+        self.assertIn("puede ser incierto", respuesta.texto)
 
     def test_fallo_de_ejecucion_no_reintenta(self):
         funcion = FuncionFalsa({}, error=RuntimeError("fallo simulado"))
@@ -294,7 +317,7 @@ class PruebaFlujoEscritura(BaseCerebro):
 
         self.assertEqual(respuesta.tipo, "error")
         self.assertFalse(respuesta.ok)
-        self.assertIn("No se aplicó la modificación", respuesta.texto)
+        self.assertIn("estado del equipo puede ser incierto", respuesta.texto)
         self.assertEqual(len(funcion.llamadas), 1)  # sin reintentos
 
     def test_el_ajuste_desactivado_no_evita_la_pregunta(self):
@@ -419,13 +442,15 @@ class PruebaRegistro(BaseCerebro):
         self.assertIsNotNone(ruta)
         contenido = json.loads(Path(ruta).read_text(encoding="utf-8"))
         self.assertEqual(contenido["modelo"], self.ajustes.modelo)
-        self.assertEqual(len(contenido["eventos"]), 1)
-        evento = contenido["eventos"][0]
-        self.assertEqual(evento["paso"], 1)
-        self.assertEqual(evento["usuario"], "Cambia el comentario de ether4 en R1")
-        self.assertEqual(evento["intencion"]["herramienta"], ACTUALIZAR_COMENTARIO)
-        self.assertEqual(evento["plan"]["accion"]["argumentos"]["interfaz"], "ether4")
-        self.assertTrue(evento["resultado"]["aprobada"])
+        eventos = contenido["eventos"]
+        self.assertGreaterEqual(len(eventos), 5)
+        self.assertEqual(eventos[0]["paso"], 1)
+        self.assertEqual(eventos[0]["usuario"], "Cambia el comentario de ether4 en R1")
+        propuesta = next(e for e in eventos if e.get("nota", "").startswith("propuesta:"))
+        self.assertEqual(propuesta["intencion"]["herramienta"], ACTUALIZAR_COMENTARIO)
+        self.assertEqual(propuesta["plan"]["accion"]["argumentos"]["interfaz"], "ether4")
+        ejecucion = next(e for e in eventos if e.get("nota") == "ejecución de escritura")
+        self.assertTrue(ejecucion["resultado"]["aprobada"])
         self.assertIsNone(cerebro.error_registro)
 
     def test_el_registro_no_contiene_secretos(self):

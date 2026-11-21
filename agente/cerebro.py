@@ -29,7 +29,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
-from agente.catalogo import (ACTUALIZAR_COMENTARIO, CONSULTAR_INTERFACES, CONSULTAR_BLOQUEO,
+from agente.catalogo import (ACTUALIZAR_COMENTARIO, CONSULTAR_INTERFACES, CONSULTAR_INVENTARIO,
+                             CONSULTAR_BLOQUEO,
                              Catalogo, catalogo_por_defecto)
 from agente.ejecutar import Resultado, aprobar, ejecutar
 from agente.interpretar import (
@@ -40,8 +41,18 @@ from agente.interpretar import (
     ProveedorIA,
     interpretar,
     MENSAJE_SISTEMA,
+    SolicitudAnalisis,
+    SolicitudComentario,
+    SolicitudDiagnostico,
+    SolicitudInterfaces,
     _a_intencion,
     crear_proveedor,
+    es_consulta_inventario,
+    extraer_filtro_interfaces_estado,
+    extraer_solicitud_analisis,
+    extraer_solicitud_comentario,
+    extraer_solicitud_diagnostico,
+    extraer_solicitud_interfaces,
     ProveedorOpenAI,
 )
 from agente.planificador import Plan, cancelar, planificar
@@ -281,6 +292,63 @@ class Cerebro:
         if _contiene_secreto(consulta):
             return self._respuesta_error(consulta, "datos_sensibles", "La solicitud contiene datos sensibles y no se enviará al modelo")
 
+        # Las consultas por estado son una transformación determinista de la
+        # respuesta de lectura. No se delega al modelo la elección de
+        # ``running``/``down`` ni la combinación de equipos: así se evita que
+        # una respuesta conversacional del modelo o una sola tool call oculte
+        # datos válidos. La herramienta sigue siendo la misma y continúa en
+        # modo solo lectura.
+        filtro_estado = extraer_filtro_interfaces_estado(consulta)
+        proveedor_real = self._proveedor
+        puede_consultar_deterministicamente = (
+            proveedor_real is None
+            or isinstance(proveedor_real, ProveedorOpenAI)
+            or not callable(getattr(proveedor_real, "responder_historial", None))
+        )
+        if es_consulta_inventario(consulta):
+            intencion = Intencion(
+                tipo=TIPO_HERRAMIENTA,
+                herramienta=CONSULTAR_INVENTARIO,
+                argumentos={},
+            )
+            return self._atender_herramienta(consulta, intencion)
+        solicitud_diagnostico = extraer_solicitud_diagnostico(consulta)
+        if solicitud_diagnostico is not None and (
+            proveedor_real is None
+            or isinstance(proveedor_real, ProveedorOpenAI)
+            or any(not self._equipo_configurado(clave) for clave in solicitud_diagnostico.equipos)
+        ):
+            return self._atender_diagnostico(solicitud_diagnostico, consulta)
+        solicitud_analisis = extraer_solicitud_analisis(consulta)
+        if solicitud_analisis is not None and (
+            proveedor_real is None
+            or isinstance(proveedor_real, ProveedorOpenAI)
+            or any(not self._equipo_configurado(clave) for clave in solicitud_analisis.equipos)
+        ):
+            return self._atender_analisis(solicitud_analisis, consulta)
+        solicitud_interfaces = extraer_solicitud_interfaces(consulta)
+        if solicitud_interfaces is not None and (
+            proveedor_real is None
+            or isinstance(proveedor_real, ProveedorOpenAI)
+            or any(not self._equipo_configurado(clave) for clave in solicitud_interfaces.equipos)
+        ):
+            return self._atender_interfaces_solicitadas(solicitud_interfaces, consulta)
+        if filtro_estado is not None and (
+            puede_consultar_deterministicamente
+            or any(not self._equipo_configurado(clave) for clave in filtro_estado.equipos)
+        ):
+            return self._atender_interfaces_por_estado(consulta, filtro_estado)
+
+        # Si una solicitud de escritura explícita llega como texto del modelo,
+        # no se puede aceptar ese texto como respuesta final. El respaldo
+        # determinista conserva la interpretación acotada del caso de uso y
+        # la somete igualmente a planificador, políticas y aprobación humana.
+        solicitud_comentario = extraer_solicitud_comentario(consulta)
+        if solicitud_comentario is not None and (
+            proveedor_real is None or isinstance(proveedor_real, ProveedorOpenAI)
+        ):
+            return self._atender_escritura_explicita(consulta, solicitud_comentario)
+
         # Proveedores antiguos pueden seguir atendiendo lecturas, pero no pueden
         # autorizar escrituras sin el protocolo de diagnóstico del ciclo.
         if self._proveedor is None or callable(getattr(self._proveedor, "responder_historial", None)):
@@ -319,6 +387,710 @@ class Cerebro:
             return self._respuesta_error(consulta, "diagnostico_requerido",
                 "El proveedor no admite el diagnóstico previo obligatorio")
         return self._atender_herramienta(consulta, intencion)
+
+    def _atender_escritura_explicita(
+        self, consulta: str, solicitud: SolicitudComentario
+    ) -> Respuesta:
+        """Ejecuta el protocolo completo para un cambio explícito de comentario."""
+        intencion = Intencion(
+            tipo=TIPO_HERRAMIENTA,
+            herramienta=ACTUALIZAR_COMENTARIO,
+            argumentos={
+                "equipo": solicitud.equipo,
+                "interfaz": solicitud.interfaz,
+                "comentario": solicitud.comentario,
+            },
+        )
+        try:
+            plan = planificar(
+                self.ajustes,
+                ACTUALIZAR_COMENTARIO,
+                intencion.argumentos,
+                catalogo=self._catalogo,
+            )
+        except ErrorHerramienta as exc:
+            return self._respuesta_error(
+                consulta,
+                exc.tipo,
+                exc.mensaje,
+                intencion=intencion,
+                explicacion=exc.a_dict(),
+            )
+
+        lectura = planificar(
+            self.ajustes,
+            CONSULTAR_INTERFACES,
+            {"equipo": plan.accion.clave},
+            catalogo=self._catalogo,
+        )
+        diagnostico = ejecutar(
+            lectura.accion, catalogo=self._catalogo, ajustes=self.ajustes
+        )
+        seguro = self._resultado_lectura_para_modelo(
+            diagnostico, lectura.accion.clave, plan.accion.interfaz
+        )
+        self._anotar(
+            consulta,
+            intencion=intencion,
+            plan=lectura,
+            resultado=diagnostico,
+            nota="diagnóstico previo obligatorio",
+        )
+        if not seguro["ok"]:
+            return self._respuesta_error(
+                consulta,
+                "diagnostico_fallido",
+                "No se pudo leer el valor actual; no se solicitará aprobación ni se modificará nada",
+                intencion=intencion,
+            )
+
+        interfaces = [
+            item
+            for item in seguro["interfaces"]
+            if item["nombre"] == plan.accion.interfaz and "comentario" in item
+        ]
+        if len(interfaces) != 1:
+            return self._respuesta_error(
+                consulta,
+                "diagnostico_fallido",
+                "No hay un comentario actual seguro y verificable para esta interfaz",
+                intencion=intencion,
+            )
+
+        anterior = interfaces[0]["comentario"]
+        self._mostrar_vista_previa_con_valor(plan, anterior)
+        self._anotar(
+            consulta,
+            intencion=intencion,
+            plan=plan,
+            nota=f"propuesta: anterior={anterior!r}; valor nuevo solicitado",
+        )
+        if anterior == plan.accion.comentario:
+            texto = (
+                f"El comentario de {plan.accion.interfaz} en {plan.accion.equipo} "
+                f"ya coincide con «{plan.accion.comentario}»; no se requiere cambio."
+            )
+            self._anotar(consulta, plan=plan, nota=texto)
+            return Respuesta(tipo=RESPUESTA_MODIFICACION, texto=texto, ok=True)
+
+        if 1 + 2 > self.ajustes.max_herramientas_por_solicitud:
+            return self._respuesta_error(
+                consulta,
+                "limite_herramientas",
+                "No quedan llamadas suficientes para ejecutar y verificar el cambio",
+                intencion=intencion,
+            )
+
+        if not self._preguntar_aprobacion(plan):
+            resultado = cancelar(plan)
+            texto = "Modificación cancelada. No se envió nada al equipo."
+            self._anotar(
+                consulta,
+                intencion=intencion,
+                plan=plan,
+                resultado=resultado,
+                nota="aprobación rechazada",
+            )
+            return Respuesta(
+                tipo=RESPUESTA_CANCELADO,
+                texto=texto,
+                ok=False,
+                resultado=resultado.a_dict(),
+                error=dict(resultado.error or {}),
+            )
+
+        aprobacion = aprobar(plan.accion)
+        self._anotar(consulta, plan=plan, nota="aprobación explícita otorgada")
+        ejecucion = ejecutar(
+            plan.accion,
+            aprobacion,
+            catalogo=self._catalogo,
+            ajustes=self.ajustes,
+        )
+        self._anotar(consulta, plan=plan, resultado=ejecucion, nota="ejecución de escritura")
+        if not ejecucion.ok:
+            return self._respuesta_error(
+                consulta,
+                "ejecucion_fallida",
+                "El cambio no se pudo confirmar; no se informa como aplicado",
+                intencion=intencion,
+                resultado=ejecucion,
+            )
+
+        verificacion = ejecutar(
+            lectura.accion, catalogo=self._catalogo, ajustes=self.ajustes
+        )
+        seguro_verificacion = self._resultado_lectura_para_modelo(
+            verificacion, lectura.accion.clave, plan.accion.interfaz
+        )
+        self._anotar(
+            consulta,
+            plan=lectura,
+            resultado=verificacion,
+            nota="verificación independiente",
+        )
+        coincidencias = [
+            item
+            for item in seguro_verificacion.get("interfaces", [])
+            if item["nombre"] == plan.accion.interfaz
+            and item.get("comentario") == plan.accion.comentario
+        ]
+        if not seguro_verificacion["ok"] or len(coincidencias) != 1:
+            return self._respuesta_error(
+                consulta,
+                "verificacion_fallida",
+                "La lectura posterior no confirma el comentario solicitado; no se informa como aplicado",
+                intencion=intencion,
+                resultado=verificacion,
+            )
+
+        texto = (
+            f"El comentario de {plan.accion.interfaz} en {plan.accion.equipo} "
+            f"quedó como «{plan.accion.comentario}». La lectura independiente lo confirmó."
+        )
+        self._anotar(consulta, plan=lectura, nota=texto)
+        return Respuesta(
+            tipo=RESPUESTA_MODIFICACION,
+            texto=texto,
+            ok=True,
+            resultado=ejecucion.a_dict(),
+        )
+
+    def _atender_analisis(
+        self,
+        solicitud: SolicitudAnalisis,
+        consulta: str,
+        *,
+        diagnostico: bool = False,
+    ) -> Respuesta:
+        """Analiza equipos usando únicamente la herramienta de interfaces."""
+        resultados: dict[str, dict[str, Any]] = {}
+        observados: dict[str, list[Mapping[str, Any]]] = {}
+        bloques: list[str] = []
+        fallos: list[tuple[str, Mapping[str, Any]]] = []
+        incompletos: list[tuple[str, str]] = []
+
+        for clave in solicitud.equipos:
+            if not self._equipo_configurado(clave):
+                detalle = self._dispositivo_no_configurado(clave)
+                resultados[clave] = {"ok": False, "error": detalle}
+                fallos.append((clave, detalle))
+                bloques.append(self._formatear_fallo_analisis(clave, detalle))
+                continue
+            try:
+                plan = planificar(
+                    self.ajustes,
+                    CONSULTAR_INTERFACES,
+                    {"equipo": clave},
+                    catalogo=self._catalogo,
+                )
+            except ErrorHerramienta as exc:
+                detalle = exc.a_dict()
+                resultados[clave] = {"ok": False, "error": detalle}
+                fallos.append((clave, detalle))
+                bloques.append(self._formatear_fallo_analisis(clave, detalle))
+                continue
+
+            resultado = ejecutar(
+                plan.accion, catalogo=self._catalogo, ajustes=self.ajustes
+            )
+            datos_resultado = resultado.a_dict()
+            resultados[clave] = datos_resultado
+            self._anotar(
+                consulta,
+                plan=plan,
+                resultado=resultado,
+                nota="análisis general de solo lectura",
+            )
+
+            if not resultado.ok:
+                detalle = datos_resultado.get("error") or {
+                    "tipo": "consulta_fallida",
+                    "mensaje": "la herramienta no devolvió un error detallado",
+                }
+                fallos.append((clave, detalle))
+                bloques.append(self._formatear_fallo_analisis(clave, detalle))
+                continue
+
+            salida = resultado.salida or {}
+            interfaces = salida.get("interfaces")
+            if not isinstance(interfaces, list) or not interfaces:
+                motivo = "no se obtuvieron interfaces reconocibles"
+                incompletos.append((clave, motivo))
+                bloques.append(
+                    f"Análisis de {clave.upper()} incompleto: {motivo}."
+                )
+                continue
+
+            observados[clave] = [
+                item for item in interfaces if isinstance(item, Mapping)
+            ]
+            resumen, motivo = (
+                self._resumir_diagnostico(clave, interfaces)
+                if diagnostico
+                else self._resumir_analisis(clave, interfaces)
+            )
+            bloques.append(resumen)
+            if motivo is not None:
+                incompletos.append((clave, motivo))
+
+        if diagnostico and observados:
+            bloques.append(self._resumen_comparativo(observados))
+
+        todo_completo = not fallos and not incompletos
+        if len(solicitud.equipos) == 1:
+            resultado_final: dict[str, Any] = dict(resultados[solicitud.equipos[0]])
+        else:
+            resultado_final = {
+                "ok": todo_completo,
+                "equipos": resultados,
+                "error": None,
+            }
+
+        if not todo_completo:
+            if len(solicitud.equipos) == 1 and fallos:
+                error_final = dict(fallos[0][1])
+            elif len(solicitud.equipos) == 1 and incompletos:
+                error_final = error_json("respuesta_incompleta", incompletos[0][1])
+            else:
+                error_final = error_json(
+                    "consulta_parcial",
+                    "No se pudo completar el análisis de todos los equipos",
+                )
+            return Respuesta(
+                tipo=RESPUESTA_ERROR,
+                texto="\n\n".join(bloques),
+                ok=False,
+                resultado=resultado_final,
+                error=error_final,
+            )
+
+        return Respuesta(
+            tipo=RESPUESTA_CONSULTA,
+            texto="\n\n".join(bloques),
+            ok=True,
+            resultado=resultado_final,
+        )
+
+    def _atender_diagnostico(
+        self, solicitud: SolicitudDiagnostico, consulta: str
+    ) -> Respuesta:
+        """Ejecuta un diagnóstico conjunto sin reutilizar resultados antiguos."""
+        return self._atender_analisis(
+            SolicitudAnalisis(equipos=solicitud.equipos),
+            consulta,
+            diagnostico=True,
+        )
+
+    def _dispositivo_no_configurado(self, clave: str) -> dict[str, str]:
+        """Construye un error determinista a partir del inventario cargado."""
+        disponibles = [
+            dispositivo.nombre
+            for dispositivo in self.ajustes.dispositivos.values()
+        ]
+        if disponibles:
+            detalle = "Dispositivos disponibles: " + ", ".join(disponibles) + "."
+        else:
+            detalle = "No hay dispositivos configurados en el inventario."
+        return error_json(
+            "dispositivo_no_configurado",
+            f"El dispositivo {clave.upper()} no está configurado en el inventario. {detalle}",
+        )
+
+    def _equipo_configurado(self, clave: str) -> bool:
+        """Comprueba existencia sin abrir conexiones ni delegar al modelo."""
+        return clave.casefold() in self.ajustes.dispositivos
+
+    def _atender_interfaces_solicitadas(
+        self, solicitud: SolicitudInterfaces, consulta: str
+    ) -> Respuesta:
+        """Consulta interfaces completas validando el inventario antes de leer."""
+        resultados: dict[str, dict[str, Any]] = {}
+        bloques: list[str] = []
+        fallos: list[tuple[str, Mapping[str, Any]]] = []
+
+        for clave in solicitud.equipos:
+            if not self._equipo_configurado(clave):
+                detalle = self._dispositivo_no_configurado(clave)
+                resultados[clave] = {"ok": False, "error": detalle}
+                fallos.append((clave, detalle))
+                bloques.append(self._formatear_fallo_analisis(clave, detalle))
+                continue
+            plan = planificar(
+                self.ajustes,
+                CONSULTAR_INTERFACES,
+                {"equipo": clave},
+                catalogo=self._catalogo,
+            )
+            resultado = ejecutar(
+                plan.accion, catalogo=self._catalogo, ajustes=self.ajustes
+            )
+            datos = resultado.a_dict()
+            resultados[clave] = datos
+            self._anotar(
+                consulta,
+                plan=plan,
+                resultado=resultado,
+                nota="consulta completa de interfaces",
+            )
+            if resultado.ok:
+                salida = resultado.salida or {}
+                if isinstance(salida.get("interfaces"), list):
+                    bloques.append(self._formatear_resultado(plan, resultado))
+                else:
+                    detalle = error_json(
+                        "respuesta_incompleta",
+                        "La consulta no devolvió una lista de interfaces reconocible",
+                    )
+                    datos["ok"] = False
+                    datos["error"] = detalle
+                    fallos.append((clave, detalle))
+                    bloques.append(self._formatear_fallo_analisis(clave, detalle))
+            else:
+                detalle = datos.get("error") or error_json(
+                    "consulta_fallida", "La consulta no devolvió un error detallado"
+                )
+                fallos.append((clave, detalle))
+                bloques.append(self._formatear_fallo_analisis(clave, detalle))
+
+        completo = not fallos
+        if len(solicitud.equipos) == 1:
+            resultado_final: dict[str, Any] = dict(resultados[solicitud.equipos[0]])
+        else:
+            resultado_final = {
+                "ok": completo,
+                "equipos": resultados,
+                "error": None if completo else error_json(
+                    "consulta_parcial", "No se pudieron consultar todos los equipos solicitados"
+                ),
+            }
+        if not completo:
+            error_final = (
+                dict(fallos[0][1])
+                if len(solicitud.equipos) == 1
+                else error_json(
+                    "consulta_parcial",
+                    "No se pudieron consultar todos los equipos solicitados",
+                )
+            )
+            return Respuesta(
+                tipo=RESPUESTA_ERROR,
+                texto="\n\n".join(bloques),
+                ok=False,
+                resultado=resultado_final,
+                error=error_final,
+            )
+        return Respuesta(
+            tipo=RESPUESTA_CONSULTA,
+            texto="\n\n".join(bloques),
+            ok=True,
+            resultado=resultado_final,
+        )
+
+    @staticmethod
+    def _resumir_analisis(
+        clave: str, interfaces: list[Any]
+    ) -> tuple[str, str | None]:
+        """Resume solo interfaces y campos presentes en la salida real."""
+        por_estado: dict[str, list[str]] = {
+            "running": [],
+            "down": [],
+            "disabled": [],
+        }
+        detalles: list[Mapping[str, Any]] = []
+        campos_faltantes: list[str] = []
+        for indice, item in enumerate(interfaces, start=1):
+            if not isinstance(item, Mapping):
+                campos_faltantes.append(f"interfaz {indice} no es un objeto")
+                continue
+            nombre = item.get("nombre")
+            if not isinstance(nombre, str) or not nombre.strip():
+                campos_faltantes.append(f"interfaz {indice} sin nombre")
+                continue
+            nombre = nombre.strip()
+            estado = item.get("estado")
+            if estado in por_estado:
+                por_estado[estado].append(nombre)
+            else:
+                campos_faltantes.append(f"{nombre} sin estado reconocido")
+            detalles.append(item)
+
+        def enumerar(nombres: list[str]) -> str:
+            if not nombres:
+                return "ninguna observada"
+            if len(nombres) == 1:
+                return nombres[0]
+            return ", ".join(nombres[:-1]) + " y " + nombres[-1]
+
+        lineas = [
+            f"Análisis de {clave.upper()} (solo lectura):",
+            f"Interfaces observadas: {len(detalles)}.",
+            f"Activas (running): {enumerar(por_estado['running'])}.",
+            f"Desconectadas (down): {enumerar(por_estado['down'])}.",
+            f"Desactivadas (disabled): {enumerar(por_estado['disabled'])}.",
+            "Detalle de interfaces:",
+        ]
+        for item in detalles:
+            nombre = str(item["nombre"]).strip()
+            estado = item.get("estado") or "estado no informado"
+            ip = item.get("ip")
+            if not isinstance(ip, str) or not ip.strip():
+                ip_texto = "IP no configurada"
+            else:
+                ip_texto = f"IP {ip.strip()}"
+            if "comentario" not in item:
+                comentario = "comentario no informado"
+            elif item.get("comentario"):
+                comentario = f"comentario «{item['comentario']}»"
+            else:
+                comentario = "sin comentario"
+            lineas.append(f"  - {nombre} | {estado} | {ip_texto} | {comentario}")
+
+        motivo = None
+        if campos_faltantes:
+            motivo = "Datos incompletos: " + "; ".join(campos_faltantes)
+            lineas.append(motivo + ".")
+        return "\n".join(lineas), motivo
+
+    @staticmethod
+    def _resumir_diagnostico(
+        clave: str, interfaces: list[Any]
+    ) -> tuple[str, str | None]:
+        """Resume el diagnóstico de un equipo y separa observación de conclusión."""
+        resumen, motivo = Cerebro._resumir_analisis(clave, interfaces)
+        lineas = [resumen, "Observaciones:"]
+        validas = [item for item in interfaces if isinstance(item, Mapping)]
+        running = [
+            str(item["nombre"])
+            for item in validas
+            if item.get("estado") == "running" and item.get("nombre")
+        ]
+        down = [
+            str(item["nombre"])
+            for item in validas
+            if item.get("estado") == "down" and item.get("nombre")
+        ]
+        disabled = [
+            str(item["nombre"])
+            for item in validas
+            if item.get("estado") == "disabled" and item.get("nombre")
+        ]
+        sin_ip = [
+            str(item["nombre"])
+            for item in validas
+            if item.get("nombre")
+            and (not isinstance(item.get("ip"), str) or not item.get("ip", "").strip())
+        ]
+        comentarios = [
+            str(item["nombre"])
+            for item in validas
+            if item.get("nombre") and item.get("comentario")
+        ]
+        if down:
+            lineas.append(
+                "- Situación que merece revisión: "
+                f"{', '.join(down)} aparece(n) con estado down. "
+                "Este estado por sí solo no confirma una avería."
+            )
+        if disabled:
+            lineas.append(
+                "- Situación que merece revisión: "
+                f"{', '.join(disabled)} aparece(n) con estado disabled."
+            )
+        if sin_ip:
+            lineas.append(
+                "- Dato observado: "
+                f"{', '.join(sin_ip)} no tiene(n) una IP configurada en el resultado."
+            )
+        if running:
+            lineas.append(
+                "- Estado observado como normal en esta consulta: "
+                f"{', '.join(running)} aparece(n) con estado running."
+            )
+        if comentarios:
+            lineas.append(
+                "- Comentarios configurados observados en: " + ", ".join(comentarios) + "."
+            )
+        if not any((down, disabled, sin_ip, running, comentarios)):
+            lineas.append(
+                "- No hay datos suficientes para formular observaciones adicionales."
+            )
+        return "\n".join(lineas), motivo
+
+    @staticmethod
+    def _resumen_comparativo(
+        observados: Mapping[str, list[Mapping[str, Any]]]
+    ) -> str:
+        """Compara conteos y datos presentes sin diagnosticar fallas no probadas."""
+        lineas = ["Resumen comparativo de los datos obtenidos:"]
+        for clave, interfaces in observados.items():
+            conteos = {
+                estado: sum(1 for item in interfaces if item.get("estado") == estado)
+                for estado in ("running", "down", "disabled")
+            }
+            con_ip = sum(
+                1
+                for item in interfaces
+                if isinstance(item.get("ip"), str) and item.get("ip", "").strip()
+            )
+            sin_ip = len(interfaces) - con_ip
+            con_comentario = sum(1 for item in interfaces if item.get("comentario"))
+            lineas.append(
+                f"- {clave.upper()}: running={conteos['running']}, "
+                f"down={conteos['down']}, disabled={conteos['disabled']}; "
+                f"con IP={con_ip}, sin IP={sin_ip}, "
+                f"con comentario={con_comentario}."
+            )
+        lineas.append(
+            "Las observaciones se basan únicamente en las lecturas actuales; "
+            "un estado down no permite concluir por sí solo que exista una avería."
+        )
+        return "\n".join(lineas)
+
+    @staticmethod
+    def _formatear_fallo_analisis(
+        clave: str, error: Mapping[str, Any]
+    ) -> str:
+        tipo = error.get("tipo", "falla_desconocida")
+        mensaje = error.get("mensaje", "sin detalles disponibles")
+        return f"No se pudo analizar {clave.upper()} ({tipo}): {mensaje}"
+
+    def _atender_interfaces_por_estado(self, consulta: str, filtro: Any) -> Respuesta:
+        """Consulta y filtra interfaces observadas para uno o varios equipos."""
+        equipos = tuple(filtro.equipos)
+        if len(equipos) > self.ajustes.max_herramientas_por_solicitud:
+            texto = (
+                f"La consulta requiere {len(equipos)} lecturas, pero el máximo "
+                f"permitido por solicitud es {self.ajustes.max_herramientas_por_solicitud}."
+            )
+            return self._respuesta_error(consulta, "limite_herramientas", texto)
+
+        por_equipo: dict[str, dict[str, Any]] = {}
+        seleccionadas: dict[str, list[Mapping[str, Any]]] = {}
+        fallos: list[tuple[str, Mapping[str, Any]]] = []
+
+        for clave in equipos:
+            if not self._equipo_configurado(clave):
+                detalle = self._dispositivo_no_configurado(clave)
+                por_equipo[clave] = {"ok": False, "error": detalle}
+                fallos.append((clave, detalle))
+                continue
+            try:
+                plan = planificar(
+                    self.ajustes,
+                    CONSULTAR_INTERFACES,
+                    {"equipo": clave},
+                    catalogo=self._catalogo,
+                )
+            except ErrorHerramienta as exc:
+                detalle = {"ok": False, "error": exc.a_dict()}
+                por_equipo[clave] = detalle
+                fallos.append((clave, detalle["error"]))
+                continue
+
+            resultado = ejecutar(
+                plan.accion, catalogo=self._catalogo, ajustes=self.ajustes
+            )
+            datos_resultado = resultado.a_dict()
+            self._anotar(
+                consulta,
+                plan=plan,
+                resultado=resultado,
+                nota=f"consulta de interfaces filtrada a estado {filtro.estado}",
+            )
+
+            if not resultado.ok:
+                por_equipo[clave] = datos_resultado
+                fallos.append((clave, datos_resultado.get("error") or {}))
+                continue
+
+            salida = datos_resultado.get("salida") or {}
+            interfaces = salida.get("interfaces")
+            if not isinstance(interfaces, list):
+                error = error_json(
+                    "respuesta_no_reconocida",
+                    "La herramienta no devolvió una lista de interfaces reconocible",
+                )
+                datos_resultado["ok"] = False
+                datos_resultado["error"] = error
+                por_equipo[clave] = datos_resultado
+                fallos.append((clave, error))
+                continue
+
+            # Comparación exacta con el estado normalizado por
+            # herramientas.estado_interfaces. No se infiere ningún estado.
+            encontradas = [
+                item
+                for item in interfaces
+                if isinstance(item, Mapping) and item.get("estado") == filtro.estado
+            ]
+            salida_filtrada = dict(salida)
+            salida_filtrada["interfaces"] = [dict(item) for item in encontradas]
+            salida_filtrada["estado_solicitado"] = filtro.estado
+            datos_resultado["salida"] = salida_filtrada
+            por_equipo[clave] = datos_resultado
+            seleccionadas[clave] = encontradas
+
+        bloques = [
+            self._formatear_interfaces_filtradas(clave, filtro.estado, interfaces)
+            for clave, interfaces in seleccionadas.items()
+        ]
+        bloques.extend(self._formatear_fallo_filtrado(clave, error) for clave, error in fallos)
+        texto = "\n".join(bloques)
+
+        todo_correcto = not fallos
+        if len(equipos) == 1:
+            resultado_final: dict[str, Any] = dict(por_equipo[equipos[0]])
+            resultado_final["estado_solicitado"] = filtro.estado
+        else:
+            resultado_final = {
+                "ok": todo_correcto,
+                "estado_solicitado": filtro.estado,
+                "equipos": por_equipo,
+                "error": None if todo_correcto else error_json(
+                    "consulta_parcial", "No se pudieron consultar todos los equipos solicitados"
+                ),
+            }
+
+        if not todo_correcto:
+            if len(equipos) == 1 and fallos and fallos[0][1]:
+                error_final = dict(fallos[0][1])
+            else:
+                error_final = error_json(
+                    "consulta_parcial",
+                    "No se pudieron consultar todos los equipos solicitados",
+                )
+            return Respuesta(
+                tipo=RESPUESTA_ERROR,
+                texto=texto,
+                ok=False,
+                resultado=resultado_final,
+                error=error_final,
+            )
+
+        return Respuesta(
+            tipo=RESPUESTA_CONSULTA,
+            texto=texto,
+            ok=True,
+            resultado=resultado_final,
+        )
+
+    @staticmethod
+    def _formatear_interfaces_filtradas(
+        clave: str, estado: str, interfaces: list[Mapping[str, Any]]
+    ) -> str:
+        equipo = clave.upper()
+        if not interfaces:
+            return f"En {equipo}, no se observaron interfaces en estado {estado}."
+        lineas = [f"Interfaces de {equipo} en estado {estado} ({len(interfaces)}):"]
+        lineas.extend(Cerebro._linea_interfaz(interfaz) for interfaz in interfaces)
+        return "\n".join(lineas)
+
+    @staticmethod
+    def _formatear_fallo_filtrado(clave: str, error: Mapping[str, Any]) -> str:
+        tipo = error.get("tipo", "falla_desconocida")
+        mensaje = error.get("mensaje", "sin detalles disponibles")
+        return f"No se pudo consultar {clave.upper()} ({tipo}): {mensaje}"
 
     @staticmethod
     def _resultado_lectura_para_modelo(resultado: Resultado, clave: str,
@@ -363,35 +1135,55 @@ class Cerebro:
 
     @staticmethod
     def _resumen_desconectadas(consulta: str, lecturas: Mapping[str, Any]) -> str | None:
-        """Enumera exclusivamente datos completos observados de estado down."""
-        texto = consulta.casefold()
-        if not re.search(r"\binterfaces\b", texto) or not re.search(r"\bdesconectad[ao]s\b", texto):
+        """Mantiene el resumen histórico para la palabra «desconectadas»."""
+        filtro = extraer_filtro_interfaces_estado(consulta)
+        if filtro is None or filtro.estado != "down":
             return None
-        if re.search(r"\bpor\s+qu[eé]\b", texto):
+        return Cerebro._resumen_interfaces_estado(consulta, lecturas, filtro)
+
+    @staticmethod
+    def _resumen_interfaces_estado(
+        consulta: str,
+        lecturas: Mapping[str, Any],
+        filtro: Any | None = None,
+    ) -> str | None:
+        """Enumera solo estados presentes en lecturas completas y verificadas."""
+        filtro = filtro or extraer_filtro_interfaces_estado(consulta)
+        if filtro is None or re.search(r"\bpor\s+qu[eé]\b", consulta.casefold()):
             return None
-        if re.search(r"\b(?:conectad[ao]s|activ[ao]s|running|disabled|deshabilitad[ao]s)\b", texto):
-            return None
-        if re.search(r"\bno\s+(?:est[aá]n\s+)?desconectad", texto):
-            return None
-        equipos = re.findall(r"\b(?:r1|sw1)\b", texto)
-        if not equipos:
-            if len(lecturas) != 1:
-                return None
-            equipos = list(lecturas)
-        equipos = list(dict.fromkeys(equipos))
+        equipos = list(filtro.equipos)
         if any(equipo not in lecturas for equipo in equipos):
             return None
+
+        etiquetas = {
+            "running": "conectadas",
+            "down": "desconectadas",
+            "disabled": "desactivadas",
+        }
+        etiqueta = etiquetas[filtro.estado]
         lineas = []
         for equipo in equipos:
             interfaces = lecturas[equipo]
-            nombres = [i["nombre"] for i in interfaces if i["estado"] == "down"]
+            nombres = [
+                item["nombre"]
+                for item in interfaces
+                if isinstance(item, Mapping) and item.get("estado") == filtro.estado
+            ]
             if nombres:
-                enumeracion = (nombres[0] if len(nombres) == 1 else
-                               ", ".join(nombres[:-1]) + " y " + nombres[-1])
-                lineas.append(f"En {equipo.upper()}, las interfaces desconectadas son "
-                              f"{enumeracion}. Todas aparecen con estado down.")
+                enumeracion = (
+                    nombres[0]
+                    if len(nombres) == 1
+                    else ", ".join(nombres[:-1]) + " y " + nombres[-1]
+                )
+                lineas.append(
+                    f"En {equipo.upper()}, las interfaces {etiqueta} son "
+                    f"{enumeracion}. Todas aparecen con estado {filtro.estado}."
+                )
             else:
-                lineas.append(f"En {equipo.upper()}, no se observaron interfaces en estado down.")
+                lineas.append(
+                    f"En {equipo.upper()}, no se observaron interfaces en estado "
+                    f"{filtro.estado}."
+                )
         return "\n".join(lineas)
 
     def _ciclo_lectura(self, consulta: str) -> Respuesta:
@@ -427,6 +1219,22 @@ class Cerebro:
                 respuesta = proveedor.responder_historial(historial, esquemas)
                 intencion = _a_intencion(respuesta, self._catalogo)
                 if intencion.tipo == TIPO_MENSAJE:
+                    if (
+                        not estado_final
+                        and not diagnosticos
+                        and self._solicita_cambio_comentario(consulta)
+                    ):
+                        texto = (
+                            "No se recibió una propuesta de herramienta de escritura; "
+                            "no se mostró una aprobación ni se modificó el equipo."
+                        )
+                        self._anotar(consulta, intencion=intencion, nota=texto)
+                        return Respuesta(
+                            tipo=RESPUESTA_ERROR,
+                            texto=texto,
+                            ok=False,
+                            error=error_json("respuesta_invalida", texto),
+                        )
                     texto = intencion.mensaje or "No obtuve una respuesta del modelo."
                     if ultimo_seguro is not None and not ultimo_seguro["ok"]:
                         texto = "No se pudo completar la última consulta de lectura."
@@ -463,11 +1271,11 @@ class Cerebro:
                         existe = "sí" if salida_bloqueo.get("regla_administrada_existente") else "no"
                         texto = (f"En R1, bloqueo configurado: {estado}; regla administrada presente: {existe}. "
                                  "El bloqueo efectivo del tráfico no está verificado.")
-                        resumen = self._resumen_desconectadas(consulta, lecturas_completas)
+                        resumen = self._resumen_interfaces_estado(consulta, lecturas_completas)
                         if resumen:
                             texto += "\n" + resumen
                     elif ultimo:
-                        texto = self._resumen_desconectadas(consulta, lecturas_completas) or texto
+                        texto = self._resumen_interfaces_estado(consulta, lecturas_completas) or texto
                     self._anotar(consulta, intencion=intencion, nota="respuesta final")
                     return Respuesta(tipo=RESPUESTA_MODIFICACION if estado_final else (RESPUESTA_CONSULTA if ultimo else RESPUESTA_MENSAJE),
                                      texto=texto, ok=True,
@@ -745,6 +1553,19 @@ class Cerebro:
         ]
         self._salida("\n".join(lineas))
 
+    def _mostrar_vista_previa_con_valor(self, plan: Plan, anterior: str) -> None:
+        """Muestra la vista previa de escritura con el valor leído previamente."""
+        argumentos = dict(plan.vista_previa.get("argumentos") or {})
+        lineas = [
+            "Vista previa de la modificación (todavía no se envió nada al equipo):",
+            f"  Equipo:            {plan.accion.equipo}",
+            f"  Interfaz:          {plan.accion.interfaz}",
+            f"  Comentario actual:  «{anterior}»",
+            f"  Comentario nuevo:   «{argumentos.get('comentario', '')}»",
+            "  Efecto:             solo se modificará la propiedad comment.",
+        ]
+        self._salida("\n".join(lineas))
+
     @staticmethod
     def _verificado(salida: Mapping[str, Any]) -> bool:
         """Indica si la relectura del equipo confirma el cambio."""
@@ -801,6 +1622,24 @@ class Cerebro:
                 f"({previo}). La relectura de la interfaz coincide."
             )
 
+        if plan.herramienta == CONSULTAR_INVENTARIO:
+            dispositivos = salida.get("dispositivos")
+            if not isinstance(dispositivos, list):
+                return "El inventario no devolvió dispositivos reconocibles."
+            if not dispositivos:
+                return "No hay dispositivos configurados en el inventario."
+            lineas = [f"Dispositivos configurados en el inventario ({len(dispositivos)}):"]
+            for dispositivo in dispositivos:
+                if not isinstance(dispositivo, Mapping):
+                    continue
+                nombre = dispositivo.get("nombre") or "nombre no indicado"
+                rol = dispositivo.get("rol") or "rol no indicado"
+                ip = dispositivo.get("ip") or "no configurada"
+                clave = dispositivo.get("clave")
+                prefijo = f"{clave}: " if clave else ""
+                lineas.append(f"  - {prefijo}{nombre} | rol: {rol} | IP: {ip}")
+            return "\n".join(lineas)
+
         if plan.herramienta == CONSULTAR_BLOQUEO:
             estado = "sí" if salida.get("bloqueo_configurado") else "no"
             return (f"En R1, bloqueo configurado de PC1 hacia el servidor WAN: {estado}. "
@@ -842,14 +1681,26 @@ class Cerebro:
         *,
         intencion: Intencion | None = None,
         explicacion: Mapping[str, str] | None = None,
+        resultado: Resultado | Mapping[str, Any] | None = None,
     ) -> Respuesta:
         texto = self._texto_error(tipo, mensaje)
         detalle = dict(explicacion) if explicacion is not None else error_json(tipo, mensaje)
-        self._anotar(consulta, intencion=intencion, resultado={"ok": False, "error": detalle})
+        self._anotar(
+            consulta,
+            intencion=intencion,
+            resultado=resultado if resultado is not None else {"ok": False, "error": detalle},
+        )
         return Respuesta(
             tipo=RESPUESTA_ERROR,
             ok=False,
             texto=texto,
+            resultado=(
+                resultado.a_dict()
+                if isinstance(resultado, Resultado)
+                else dict(resultado)
+                if resultado is not None
+                else None
+            ),
             error=error_json(tipo, mensaje),
         )
 
@@ -867,6 +1718,7 @@ class Cerebro:
             "herramienta_no_autorizada": "El modelo propuso una herramienta no autorizada",
             "argumentos_invalidos": "El modelo propuso argumentos no válidos",
             "dispositivo_no_autorizado": "Ese equipo no está autorizado",
+            "dispositivo_no_configurado": "Dispositivo no configurado",
             "interfaz_no_autorizada": "Esa interfaz no está autorizada",
             "parametros_invalidos": "La petición no es válida",
         }

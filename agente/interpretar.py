@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import unicodedata
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
@@ -121,6 +123,189 @@ class Intencion:
             "argumentos": dict(self.argumentos),
             "mensaje": self.mensaje,
         }
+
+
+@dataclass(frozen=True)
+class FiltroInterfacesEstado:
+    """Filtro determinista para consultas de interfaces por estado.
+
+    El filtro no es un argumento de una herramienta: la herramienta existente
+    devuelve todas las interfaces y el agente filtra únicamente los estados
+    que realmente observó en esa respuesta.
+    """
+
+    estado: str
+    equipos: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SolicitudComentario:
+    """Solicitud explícita y estructurada para cambiar un comentario."""
+
+    equipo: str
+    interfaz: str
+    comentario: str
+
+
+@dataclass(frozen=True)
+class SolicitudAnalisis:
+    """Solicitud de análisis de solo lectura para uno o varios equipos."""
+
+    equipos: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SolicitudDiagnostico:
+    """Solicitud de diagnóstico factual de uno o varios equipos."""
+
+    equipos: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SolicitudInterfaces:
+    """Solicitud de lectura completa de interfaces."""
+
+    equipos: tuple[str, ...]
+
+
+_PATRONES_ESTADO_INTERFACES: tuple[tuple[str, str], ...] = (
+    (r"\b(?:running|conectad[oa]s?|activ[oa]s?)\b", "running"),
+    (r"\b(?:down|desconectad[oa]s?|ca[ií]d[oa]s?)\b", "down"),
+    (r"\b(?:disabled|desactivad[oa]s?|deshabilitad[oa]s?)\b", "disabled"),
+)
+
+_PATRON_EQUIPO = r"\b(?:r|sw)\d+\b"
+
+
+def _texto_sin_acentos(texto: str) -> str:
+    """Normaliza acentos solo para reconocer el vocabulario del operador."""
+    normalizado = unicodedata.normalize("NFD", texto.casefold())
+    return "".join(caracter for caracter in normalizado if unicodedata.category(caracter) != "Mn")
+
+
+def extraer_filtro_interfaces_estado(mensaje: str) -> FiltroInterfacesEstado | None:
+    """Reconoce consultas explícitas de interfaces filtradas por estado.
+
+    Extrae claves con formato ``rN``/``swN`` y deja la comprobación de existencia
+    al inventario cargado por el agente. Si no se indica un equipo, o la frase
+    expresa una negación/condición ambigua, se devuelve ``None``.
+    """
+    if not isinstance(mensaje, str):
+        return None
+    texto = _texto_sin_acentos(mensaje)
+    if not re.search(r"\binterfaces?\b", texto):
+        return None
+
+    equipos = tuple(dict.fromkeys(re.findall(_PATRON_EQUIPO, texto)))
+    if not equipos:
+        return None
+
+    coincidencias: list[tuple[int, str]] = []
+    for patron, estado in _PATRONES_ESTADO_INTERFACES:
+        coincidencia = re.search(patron, texto)
+        if coincidencia is None:
+            continue
+        antes = texto[max(0, coincidencia.start() - 18):coincidencia.start()]
+        if re.search(r"\bno\s+(?:estan\s+)?$", antes):
+            return None
+        coincidencias.append((coincidencia.start(), estado))
+    estados = {estado for _, estado in coincidencias}
+    if len(estados) != 1:
+        # "activas y desconectadas", por ejemplo, requiere la lista completa;
+        # no se debe elegir silenciosamente solo uno de los estados.
+        return None
+    return FiltroInterfacesEstado(estado=coincidencias[0][1], equipos=equipos)
+
+
+def extraer_solicitud_comentario(mensaje: str) -> SolicitudComentario | None:
+    """Extrae el caso explícito de cambio de comentario como respaldo seguro.
+
+    Se usa únicamente cuando el proveedor devuelve texto en vez de una llamada
+    de escritura. El resultado todavía pasa por ``planificar`` y las políticas;
+    esta función no autoriza ni ejecuta nada.
+    """
+    if not isinstance(mensaje, str):
+        return None
+    coincidencia = re.search(
+        r"\b(?:cambia|cambiar|cambie|modifica|modificar|modifique|"
+        r"actualiza|actualizar|actualice)\s+el\s+comentario\s+"
+        r"(?:de|del)\s+([A-Za-z0-9][A-Za-z0-9._-]{0,63})\s+"
+        r"(?:en|de)\s+(r1|sw1)\s+(?:a|por|como)\s+(.+?)\s*[.!?]?$",
+        mensaje.strip(),
+        re.IGNORECASE,
+    )
+    if coincidencia is None:
+        return None
+    comentario = coincidencia.group(3).strip()
+    if not comentario:
+        return None
+    return SolicitudComentario(
+        equipo=coincidencia.group(2).casefold(),
+        interfaz=coincidencia.group(1),
+        comentario=comentario,
+    )
+
+
+def es_consulta_inventario(mensaje: str) -> bool:
+    """Reconoce preguntas sobre el inventario, no sobre interfaces autorizadas."""
+    if not isinstance(mensaje, str):
+        return False
+    texto = _texto_sin_acentos(mensaje)
+    if not re.search(r"\bdispositiv(?:o|os)\b", texto):
+        return False
+    return bool(
+        re.search(r"\binventario\b", texto)
+        or re.search(r"\bdispositiv(?:o|os)\b.*\bconfigurad[oa]s?\b", texto)
+    )
+
+
+def extraer_solicitud_analisis(mensaje: str) -> SolicitudAnalisis | None:
+    """Reconoce un análisis general de dispositivos en modo solo lectura."""
+    if not isinstance(mensaje, str):
+        return None
+    texto = _texto_sin_acentos(mensaje)
+    if not re.search(
+        r"\b(?:analiza|analizar|analisis|diagnostica|diagnosticar|"
+        r"revisa|revisar)\b",
+        texto,
+    ):
+        return None
+    if re.search(r"\bno\s+(?:puedes\s+)?(?:analiz|diagnostic|revis)", texto):
+        return None
+    equipos = tuple(dict.fromkeys(re.findall(_PATRON_EQUIPO, texto)))
+    if not equipos:
+        return None
+    return SolicitudAnalisis(equipos=equipos)
+
+
+def extraer_solicitud_diagnostico(mensaje: str) -> SolicitudDiagnostico | None:
+    """Reconoce preguntas por problemas u observaciones de dispositivos."""
+    if not isinstance(mensaje, str):
+        return None
+    texto = _texto_sin_acentos(mensaje)
+    if not re.search(
+        r"\b(?:problemas?|situaciones?|diagnostico|hallazgos?|"
+        r"observaciones?|incidencias?|importantes?)\b",
+        texto,
+    ):
+        return None
+    equipos = tuple(dict.fromkeys(re.findall(_PATRON_EQUIPO, texto)))
+    if not equipos:
+        return None
+    return SolicitudDiagnostico(equipos=equipos)
+
+
+def extraer_solicitud_interfaces(mensaje: str) -> SolicitudInterfaces | None:
+    """Reconoce una consulta completa de interfaces para equipos mencionados."""
+    if not isinstance(mensaje, str):
+        return None
+    texto = _texto_sin_acentos(mensaje)
+    if not re.search(r"\binterfaces?\b", texto):
+        return None
+    equipos = tuple(dict.fromkeys(re.findall(_PATRON_EQUIPO, texto)))
+    if not equipos or extraer_filtro_interfaces_estado(mensaje) is not None:
+        return None
+    return SolicitudInterfaces(equipos=equipos)
 
 
 class ProveedorIA(Protocol):

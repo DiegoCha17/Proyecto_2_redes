@@ -26,7 +26,7 @@ from functools import lru_cache
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
 
-from config.ajustes import Ajustes
+from config.ajustes import Ajustes, obtener_ajustes
 from herramientas.actualizar_comentario import actualizar_comentario
 from herramientas.comun import ErrorHerramienta
 from herramientas.estado_interfaces import consultar
@@ -40,6 +40,7 @@ RIESGOS = frozenset({RIESGO_LECTURA, RIESGO_ESCRITURA})
 
 # --- Nombres estables del catálogo ------------------------------------------
 CONSULTAR_INTERFACES = "consultar_interfaces"
+CONSULTAR_INVENTARIO = "consultar_inventario"
 CONSULTAR_BLOQUEO = "consultar_bloqueo"
 ACTUALIZAR_COMENTARIO = "actualizar_comentario"
 
@@ -52,6 +53,28 @@ ACTUALIZAR_COMENTARIO = "actualizar_comentario"
 def _consultar_interfaces(equipo: str, ajustes: Ajustes | None = None) -> dict[str, Any]:
     """Consulta de solo lectura de las interfaces de un equipo autorizado."""
     return consultar(equipo, ajustes=ajustes)
+
+
+def _consultar_inventario(ajustes: Ajustes | None = None) -> dict[str, Any]:
+    """Devuelve el inventario lógico sin abrir conexiones a los equipos."""
+    ajustes = ajustes or obtener_ajustes()
+    dispositivos = []
+    for clave, dispositivo in ajustes.dispositivos.items():
+        host = getattr(dispositivo, "host", "")
+        dispositivos.append(
+            {
+                "clave": str(clave),
+                "nombre": dispositivo.nombre,
+                "rol": dispositivo.rol,
+                "ip": host.strip() if isinstance(host, str) and host.strip() else None,
+            }
+        )
+    return {
+        "ok": True,
+        "dispositivos": dispositivos,
+        "changed": False,
+        "error": None,
+    }
 
 
 def _actualizar_comentario(
@@ -261,7 +284,7 @@ class Catalogo:
 
 @lru_cache(maxsize=1)
 def catalogo_por_defecto() -> Catalogo:
-    """Catálogo real del proyecto (las dos herramientas de la Etapa 2).
+    """Catálogo real del proyecto (lecturas y escritura autorizada).
 
     Se construye bajo demanda y se reutiliza; las herramientas reciben
     ``ajustes`` por inyección en cada invocación, nunca al declararse.
@@ -280,11 +303,27 @@ def catalogo_por_defecto() -> Catalogo:
             ),
             Herramienta(
                 definicion=DefinicionHerramienta(
+                    nombre=CONSULTAR_INVENTARIO,
+                    descripcion=(
+                        "Lista el inventario lógico configurado en "
+                        "config/dispositivos.yml: clave, nombre, rol y dirección IP "
+                        "de gestión, sin consultar ni modificar los equipos."
+                    ),
+                    riesgo=RIESGO_LECTURA,
+                    parametros={},
+                    obligatorios=(),
+                ),
+                funcion=_consultar_inventario,
+            ),
+            Herramienta(
+                definicion=DefinicionHerramienta(
                     nombre=CONSULTAR_INTERFACES,
                     descripcion=(
                         "Consulta en modo solo lectura el estado de las interfaces de "
                         "un equipo autorizado: nombre, estado, dirección IP y "
-                        "comentario. No modifica la configuración."
+                        "comentario. Los estados devueltos son running, down o "
+                        "disabled; el agente puede filtrar esos resultados sin "
+                        "modificar la configuración."
                     ),
                     riesgo=RIESGO_LECTURA,
                     parametros={

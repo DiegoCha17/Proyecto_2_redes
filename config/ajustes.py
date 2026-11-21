@@ -225,11 +225,17 @@ def _construir_dispositivo(clave: str, datos: Any) -> Dispositivo:
     if not isinstance(datos, dict):
         raise ErrorConfiguracion(f"{contexto}: debe ser un mapa con los datos del equipo")
 
-    host = _texto(datos, "host", contexto)
-    try:
-        ipaddress.IPv4Address(host)
-    except ValueError as exc:
-        raise ErrorConfiguracion(f"{contexto}: 'host' no es una IPv4 válida: {host!r}") from exc
+    host_crudo = datos.get("host", "")
+    if host_crudo is None or (isinstance(host_crudo, str) and not host_crudo.strip()):
+        host = ""
+    else:
+        if not isinstance(host_crudo, str):
+            raise ErrorConfiguracion(f"{contexto}: 'host' debe ser una IPv4 o quedar vacío")
+        host = host_crudo.strip()
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError as exc:
+            raise ErrorConfiguracion(f"{contexto}: 'host' no es una IPv4 válida: {host!r}") from exc
 
     plataforma = _texto(datos, "plataforma", contexto)
     if plataforma not in PLATAFORMAS_SOPORTADAS:
@@ -348,14 +354,14 @@ def cargar_ajustes(
         raise ErrorConfiguracion("Falta la sección 'laboratorio' en dispositivos.yml")
 
     dispositivos_crudos = datos.get("dispositivos")
-    if not isinstance(dispositivos_crudos, dict) or not dispositivos_crudos:
-        raise ErrorConfiguracion("'dispositivos' debe ser un mapa no vacío")
+    if not isinstance(dispositivos_crudos, dict):
+        raise ErrorConfiguracion("'dispositivos' debe ser un mapa")
 
     dispositivos: dict[str, Dispositivo] = {}
     for clave, contenido in dispositivos_crudos.items():
         clave_normalizada = str(clave).strip().lower()
         dispositivo = _construir_dispositivo(clave_normalizada, contenido)
-        if dispositivo.host in {d.host for d in dispositivos.values()}:
+        if dispositivo.host and dispositivo.host in {d.host for d in dispositivos.values()}:
             raise ErrorConfiguracion(
                 f"La IP {dispositivo.host} está asignada a más de un dispositivo"
             )

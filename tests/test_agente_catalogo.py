@@ -7,6 +7,7 @@ import unittest
 from agente.catalogo import (
     ACTUALIZAR_COMENTARIO,
     CONSULTAR_INTERFACES,
+    CONSULTAR_INVENTARIO,
     RIESGO_ESCRITURA,
     RIESGO_LECTURA,
     Catalogo,
@@ -47,7 +48,10 @@ def definicion_falsa(
 class PruebaCatalogoPorDefecto(unittest.TestCase):
     def test_solo_declara_las_herramientas_autorizadas(self):
         catalogo = catalogo_por_defecto()
-        self.assertEqual(set(catalogo.nombres()), {CONSULTAR_INTERFACES, ACTUALIZAR_COMENTARIO, "consultar_bloqueo"})
+        self.assertEqual(
+            set(catalogo.nombres()),
+            {CONSULTAR_INTERFACES, CONSULTAR_INVENTARIO, ACTUALIZAR_COMENTARIO, "consultar_bloqueo"},
+        )
         self.assertEqual(catalogo.obtener(CONSULTAR_INTERFACES).riesgo, RIESGO_LECTURA)
         self.assertEqual(
             catalogo.obtener(ACTUALIZAR_COMENTARIO).riesgo, RIESGO_ESCRITURA

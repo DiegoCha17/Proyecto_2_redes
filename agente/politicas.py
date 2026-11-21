@@ -24,6 +24,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from agente.catalogo import (
+    CONSULTAR_INVENTARIO,
     RIESGO_ESCRITURA,
     RIESGO_LECTURA,
     Catalogo,
@@ -124,6 +125,20 @@ def preparar(
     catalogo = catalogo or catalogo_por_defecto()
     definicion = catalogo.obtener(herramienta)
     limpios = definicion.validar_argumentos(argumentos)
+
+    if definicion.nombre == CONSULTAR_INVENTARIO:
+        return Accion(
+            herramienta=definicion.nombre,
+            riesgo=definicion.riesgo,
+            clave="",
+            equipo="inventario",
+            descripcion=(
+                "Consultar el inventario lógico configurado (solo lectura)"
+            ),
+            requiere_aprobacion=False,
+            argumentos={},
+        )
+
     dispositivo = resolver_equipo(ajustes, limpios["equipo"])
     aprobacion = requiere_aprobacion_humana(definicion.riesgo)
 

@@ -10,7 +10,8 @@ Reglas que aplica este módulo:
   * La aprobación es un acto del operador. Solo el ``confirmar`` inyectado (la
     consola) puede originar una :class:`agente.ejecutar.Aprobacion`; ni el texto
     ni los argumentos que propone el modelo participan en esa decisión.
-  * El diagnóstico de lectura precede la vista previa y la aprobación explícita.
+  * La lectura previa precede los cambios de comentario; CU-02 verifica su
+    estado posterior dentro del playbook después de la aprobación explícita.
   * Se respeta ``NETAGENT_MAX_PASOS``: cada mensaje del operador consume un paso.
   * El ciclo de lectura limita las llamadas por solicitud; las escrituras
     conservan el flujo de ejecución único con aprobación humana.
@@ -30,7 +31,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from agente.catalogo import (ACTUALIZAR_COMENTARIO, CONSULTAR_INTERFACES, CONSULTAR_INVENTARIO,
-                             CONSULTAR_BLOQUEO,
+                             CONSULTAR_BLOQUEO, GESTIONAR_BLOQUEO,
                              Catalogo, catalogo_por_defecto)
 from agente.ejecutar import Resultado, aprobar, ejecutar
 from agente.interpretar import (
@@ -383,7 +384,7 @@ class Cerebro:
                               catalogo=self._catalogo)
         except ErrorHerramienta as exc:
             return self._respuesta_error(consulta, exc.tipo, exc.mensaje)
-        if plan.es_escritura:
+        if plan.es_escritura and plan.herramienta != GESTIONAR_BLOQUEO:
             return self._respuesta_error(consulta, "diagnostico_requerido",
                 "El proveedor no admite el diagnóstico previo obligatorio")
         return self._atender_herramienta(consulta, intencion)
@@ -554,6 +555,72 @@ class Cerebro:
             texto=texto,
             ok=True,
             resultado=ejecucion.a_dict(),
+        )
+
+    def _atender_gestion_bloqueo(
+        self,
+        consulta: str,
+        plan: Plan,
+        *,
+        intencion: Intencion | None = None,
+    ) -> Respuesta:
+        """Muestra, aprueba, ejecuta y verifica una escritura CU-02."""
+        self._mostrar_vista_previa(plan)
+        self._anotar(consulta, intencion=intencion, plan=plan, nota="propuesta de bloqueo")
+
+        if not self._preguntar_aprobacion(plan):
+            resultado = cancelar(plan)
+            texto = "Gestión de bloqueo cancelada. No se envió ningún cambio al equipo."
+            self._anotar(
+                consulta,
+                intencion=intencion,
+                plan=plan,
+                resultado=resultado,
+                nota="aprobación rechazada",
+            )
+            return Respuesta(
+                tipo=RESPUESTA_CANCELADO,
+                texto=texto,
+                ok=False,
+                resultado=resultado.a_dict(),
+                error=dict(resultado.error or {}),
+            )
+
+        aprobacion = aprobar(plan.accion)
+        self._anotar(consulta, intencion=intencion, plan=plan, nota="aprobación explícita otorgada")
+        resultado = ejecutar(
+            plan.accion,
+            aprobacion,
+            catalogo=self._catalogo,
+            ajustes=self.ajustes,
+        )
+        self._anotar(consulta, plan=plan, resultado=resultado, nota="ejecución de escritura")
+
+        salida = dict(resultado.salida or {})
+        if not resultado.ok:
+            return self._respuesta_error(
+                consulta,
+                "ejecucion_fallida",
+                "La gestión de bloqueo no se pudo completar; no se informa como aplicada",
+                intencion=intencion,
+                resultado=resultado,
+            )
+        if salida.get("verified") is not True:
+            return self._respuesta_error(
+                consulta,
+                "verificacion_fallida",
+                "La lectura posterior no confirmó el estado solicitado; no se informa como aplicado",
+                intencion=intencion,
+                resultado=resultado,
+            )
+
+        texto = self._formatear_resultado(plan, resultado)
+        self._anotar(consulta, plan=plan, nota="verificación posterior confirmada")
+        return Respuesta(
+            tipo=RESPUESTA_MODIFICACION,
+            texto=texto,
+            ok=True,
+            resultado=resultado.a_dict(),
         )
 
     def _atender_analisis(
@@ -1092,10 +1159,14 @@ class Cerebro:
         mensaje = error.get("mensaje", "sin detalles disponibles")
         return f"No se pudo consultar {clave.upper()} ({tipo}): {mensaje}"
 
-    @staticmethod
-    def _resultado_lectura_para_modelo(resultado: Resultado, clave: str,
+    def _resultado_lectura_para_modelo(self, resultado: Resultado, clave: str,
                                       interfaz_objetivo: str | None = None) -> dict[str, Any]:
-        """Proyección cerrada: solo el comentario autorizado, sin IP ni errores."""
+        """Proyección cerrada: solo el comentario autorizado, sin IP ni errores.
+
+        El comentario se incluye únicamente para interfaces del catálogo de
+        escritura de ``config/dispositivos.yml`` (hoy ether2 y ether4 en R1);
+        el resto de interfaces y SW1 quedan fuera de la proyección.
+        """
         if not resultado.ok:
             return {"ok": False, "equipo": clave, "error": "lectura_no_disponible"}
         salida = resultado.salida or {}
@@ -1115,7 +1186,9 @@ class Cerebro:
                     and estado in ("running", "down", "disabled")):
                 interfaz = {"nombre": nombre, "estado": estado}
                 comentario = item.get("comentario")
-                if (clave == "r1" and nombre == "ether4" and isinstance(comentario, str)
+                dispositivo = self.ajustes.dispositivos.get(clave)
+                if (dispositivo is not None and dispositivo.interfaz_autorizada(nombre)
+                        and isinstance(comentario, str)
                         and len(comentario) <= 200 and not _contiene_secreto(comentario)
                         and not any(ord(c) < 32 or ord(c) == 127 for c in comentario)):
                     interfaz["comentario"] = comentario
@@ -1317,6 +1390,10 @@ class Cerebro:
                                                   "El proveedor repitió un identificador de llamada.")
                 ids.add(identificador)
                 if plan.es_escritura:
+                    if plan.herramienta == GESTIONAR_BLOQUEO:
+                        return self._atender_gestion_bloqueo(
+                            consulta, plan, intencion=intencion
+                        )
                     if plan.herramienta != ACTUALIZAR_COMENTARIO:
                         return self._respuesta_error(consulta, "herramienta_no_autorizada", "Esta escritura aún no tiene diagnóstico ni verificación autorizados")
                     if _contiene_secreto(plan.accion.comentario or ""):
@@ -1476,6 +1553,11 @@ class Cerebro:
                 explicacion=exc.a_dict(),
             )
 
+        if plan.herramienta == GESTIONAR_BLOQUEO:
+            return self._atender_gestion_bloqueo(
+                consulta, plan, intencion=intencion
+            )
+
         self._mostrar_vista_previa(plan)
 
         aprobacion = None
@@ -1543,6 +1625,18 @@ class Cerebro:
 
         vista = plan.vista_previa
         argumentos = dict(vista.get("argumentos") or {})
+        if plan.herramienta == GESTIONAR_BLOQUEO:
+            lineas = [
+                "Vista previa de la modificación (todavía no se envió nada al equipo):",
+                f"  Equipo:            {vista.get('equipo', plan.accion.equipo)}",
+                f"  IP:                {argumentos.get('ip', '?')}",
+                f"  Acción:            {argumentos.get('accion', '?')}",
+                f"  Regla:             NETAGENT_LAB_{argumentos.get('ip', '?')}",
+                f"  Efecto:            {vista.get('efecto', 'solo la regla administrada de NetAgent-IA')}",
+                "  La operación se ejecutará solo después de una aprobación humana explícita.",
+            ]
+            self._salida("\n".join(lineas))
+            return
         lineas = [
             "Vista previa de la modificación (todavía no se envió nada al equipo):",
             f"  Equipo:            {vista.get('equipo', plan.accion.equipo)}",
@@ -1602,6 +1696,24 @@ class Cerebro:
             return f"No se pudo completar la consulta: {mensaje}"
 
         if plan.es_escritura:
+            if plan.herramienta == GESTIONAR_BLOQUEO:
+                if salida.get("verified") is not True:
+                    return (
+                        "La lectura posterior no confirmó el estado solicitado; "
+                        "no se informa como aplicado."
+                    )
+                ip = salida.get("ip") or plan.accion.argumentos.get("ip")
+                accion = plan.accion.argumentos.get("accion")
+                estado = "bloqueada" if salida.get("bloqueada") else "permitida"
+                if not salida.get("changed"):
+                    return (
+                        f"La IP {ip} ya estaba {estado} en {plan.accion.equipo}; "
+                        "no se envió ningún cambio. La verificación posterior coincide."
+                    )
+                return (
+                    f"La acción {accion} para {ip} en {plan.accion.equipo} fue aplicada "
+                    f"y la regla quedó {estado}. La verificación posterior coincide."
+                )
             if not self._verificado(salida):
                 return (
                     "El equipo no confirmó el cambio al releer la interfaz; "

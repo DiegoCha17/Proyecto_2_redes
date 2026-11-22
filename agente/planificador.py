@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from agente.catalogo import Catalogo
+from agente.catalogo import Catalogo, GESTIONAR_BLOQUEO
 from agente.ejecutar import Resultado
 from agente.politicas import Accion, preparar
 from config.ajustes import Ajustes
@@ -38,6 +38,13 @@ _PASOS_ESCRITURA = (
     "3. Leer el comentario actual para poder informar el valor anterior.",
     "4. Enviar solo el cambio de comentario, con confirmacion=True.",
     "5. Releer la interfaz; el cambio se informa como aplicado solo si coincide.",
+)
+
+_PASOS_GESTION_BLOQUEO = (
+    "1. Comprobar R1, la IPv4 y la política LAN autorizada.",
+    "2. Mostrar la vista previa y pedir aprobación humana explícita (s/N).",
+    "3. Ejecutar la operación idempotente mediante Ansible.",
+    "4. Releer la regla administrada y verificar el estado real.",
 )
 
 
@@ -87,7 +94,17 @@ def _vista_previa(accion: Accion) -> dict[str, Any]:
         "requiere_aprobacion": accion.requiere_aprobacion,
     }
 
-    if accion.es_escritura:
+    if accion.herramienta == GESTIONAR_BLOQUEO:
+        vista.update(
+            {
+                "efecto": (
+                    "Solo se modificará la regla administrada NETAGENT_LAB_ para "
+                    "la IP indicada en R1."
+                ),
+                "nota": "La operación no se ejecuta sin aprobación humana explícita.",
+            }
+        )
+    elif accion.es_escritura:
         vista.update(
             {
                 "efecto": (
@@ -124,7 +141,13 @@ def planificar(
     accion = preparar(ajustes, herramienta, argumentos, catalogo=catalogo)
     return Plan(
         accion=accion,
-        pasos=_PASOS_ESCRITURA if accion.es_escritura else _PASOS_LECTURA,
+        pasos=(
+            _PASOS_GESTION_BLOQUEO
+            if accion.herramienta == GESTIONAR_BLOQUEO
+            else _PASOS_ESCRITURA
+            if accion.es_escritura
+            else _PASOS_LECTURA
+        ),
         requiere_autorizacion=accion.requiere_aprobacion,
         vista_previa=_vista_previa(accion),
     )

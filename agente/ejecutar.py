@@ -44,15 +44,23 @@ class Aprobacion:
     interfaz: str | None = None
     comentario: str | None = None
     otorgada_por: str = "operador"
+    argumentos: Mapping[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.argumentos is not None:
+            object.__setattr__(self, "argumentos", MappingProxyType(dict(self.argumentos)))
 
     def cubre(self, accion: Accion) -> bool:
         """Indica si esta aprobación autoriza exactamente esa acción."""
-        return (
+        coincide = (
             self.herramienta == accion.herramienta
             and self.clave == accion.clave
             and self.interfaz == accion.interfaz
             and self.comentario == accion.comentario
         )
+        if self.argumentos is not None:
+            coincide = coincide and dict(self.argumentos) == dict(accion.argumentos)
+        return coincide
 
     def a_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +69,7 @@ class Aprobacion:
             "interfaz": self.interfaz,
             "comentario": self.comentario,
             "otorgada_por": self.otorgada_por,
+            "argumentos": dict(self.argumentos) if self.argumentos is not None else None,
         }
 
 
@@ -112,6 +121,7 @@ def aprobar(accion: Accion, otorgada_por: str = "operador") -> Aprobacion:
         interfaz=accion.interfaz,
         comentario=accion.comentario,
         otorgada_por=otorgada_por,
+        argumentos=accion.argumentos,
     )
 
 

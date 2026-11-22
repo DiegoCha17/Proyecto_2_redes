@@ -56,20 +56,26 @@ class PruebaPrepararAcciones(unittest.TestCase):
                 self.assertEqual(accion.equipo, nombre)
                 self.assertEqual(dict(accion.argumentos), {"equipo": clave.lower()})
 
-    def test_la_escritura_se_autoriza_solo_en_ether4_de_r1(self):
-        accion = self._preparar(
-            ACTUALIZAR_COMENTARIO,
-            {"equipo": "r1", "interfaz": "ether4", "comentario": COMENTARIO_DEMO},
-        )
-        self.assertEqual(accion.riesgo, "escritura")
-        self.assertTrue(accion.es_escritura)
-        self.assertTrue(accion.requiere_aprobacion)
-        self.assertEqual(accion.clave, "r1")
-        self.assertEqual(accion.equipo, "R1")
-        self.assertEqual(accion.interfaz, "ether4")
-        self.assertEqual(accion.comentario, COMENTARIO_DEMO)
-        self.assertIn("ether4", accion.descripcion)
-        self.assertIn(COMENTARIO_DEMO, accion.descripcion)
+    def test_la_escritura_se_autoriza_en_ether2_y_ether4_de_r1(self):
+        for interfaz in ("ether2", "ether4"):
+            with self.subTest(interfaz=interfaz):
+                accion = self._preparar(
+                    ACTUALIZAR_COMENTARIO,
+                    {
+                        "equipo": "r1",
+                        "interfaz": interfaz,
+                        "comentario": COMENTARIO_DEMO,
+                    },
+                )
+                self.assertEqual(accion.riesgo, "escritura")
+                self.assertTrue(accion.es_escritura)
+                self.assertTrue(accion.requiere_aprobacion)
+                self.assertEqual(accion.clave, "r1")
+                self.assertEqual(accion.equipo, "R1")
+                self.assertEqual(accion.interfaz, interfaz)
+                self.assertEqual(accion.comentario, COMENTARIO_DEMO)
+                self.assertIn(interfaz, accion.descripcion)
+                self.assertIn(COMENTARIO_DEMO, accion.descripcion)
 
     def test_la_accion_es_inmutable(self):
         accion = self._preparar(CONSULTAR_INTERFACES, {"equipo": "r1"})
@@ -98,7 +104,7 @@ class PruebaPrepararAcciones(unittest.TestCase):
                 )
 
     def test_sw1_no_permite_escrituras(self):
-        for interfaz in ("ether1", "ether4", "bridge"):
+        for interfaz in ("ether1", "ether2", "ether4", "bridge"):
             with self.subTest(interfaz=interfaz):
                 with self.assertRaises(ErrorHerramienta) as contexto:
                     self._preparar(
@@ -108,14 +114,17 @@ class PruebaPrepararAcciones(unittest.TestCase):
                 self.assertEqual(contexto.exception.tipo, "interfaz_no_autorizada")
                 self.assertIn("(ninguna)", contexto.exception.mensaje)
 
-    def test_r1_solo_permite_ether4(self):
-        with self.assertRaises(ErrorHerramienta) as contexto:
-            self._preparar(
-                ACTUALIZAR_COMENTARIO,
-                {"equipo": "r1", "interfaz": "ether2", "comentario": "demo"},
-            )
-        self.assertEqual(contexto.exception.tipo, "interfaz_no_autorizada")
-        self.assertIn("ether4", contexto.exception.mensaje)
+    def test_r1_rechaza_interfaces_fuera_del_catalogo(self):
+        for interfaz in ("ether1", "ether3", "ether5", "bridge"):
+            with self.subTest(interfaz=interfaz):
+                with self.assertRaises(ErrorHerramienta) as contexto:
+                    self._preparar(
+                        ACTUALIZAR_COMENTARIO,
+                        {"equipo": "r1", "interfaz": interfaz, "comentario": "demo"},
+                    )
+                self.assertEqual(contexto.exception.tipo, "interfaz_no_autorizada")
+                self.assertIn("ether2", contexto.exception.mensaje)
+                self.assertIn("ether4", contexto.exception.mensaje)
 
     def test_interfaz_con_caracteres_peligrosos_se_rechaza(self):
         for interfaz in (
@@ -193,7 +202,7 @@ class PruebaPrepararAcciones(unittest.TestCase):
         dispositivo = resolver_equipo(self.ajustes, " R1 ")
         self.assertEqual(dispositivo.nombre, "R1")
         self.assertEqual(dispositivo.host, "10.60.30.202")
-        self.assertEqual(dispositivo.interfaces_autorizadas, ("ether4",))
+        self.assertEqual(dispositivo.interfaces_autorizadas, ("ether2", "ether4"))
 
 
 if __name__ == "__main__":

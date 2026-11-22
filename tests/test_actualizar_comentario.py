@@ -160,10 +160,11 @@ class PruebaActualizarComentario(unittest.TestCase):
         self.addCleanup(parche.stop)
         self.ajustes = cargar_ajustes()
 
-    def test_configuracion_solo_autoriza_ether4_en_r1(self):
+    def test_configuracion_autoriza_ether2_y_ether4_en_r1(self):
         r1 = self.ajustes.dispositivo("r1")
+        self.assertTrue(r1.interfaz_autorizada("ether2"))
         self.assertTrue(r1.interfaz_autorizada("ether4"))
-        self.assertFalse(r1.interfaz_autorizada("ether2"))
+        self.assertFalse(r1.interfaz_autorizada("ether1"))
         self.assertEqual(self.ajustes.dispositivo("sw1").interfaces_autorizadas, ())
 
     def test_equipo_no_autorizado_no_abre_conexion(self):
@@ -181,11 +182,12 @@ class PruebaActualizarComentario(unittest.TestCase):
     def test_interfaz_no_autorizada_no_abre_conexion(self):
         with patch("herramientas.comun.ConnectHandler") as mock:
             resultado = actualizar_comentario(
-                "r1", "ether2", COMENTARIO_DEMO, True, self.ajustes
+                "r1", "ether3", COMENTARIO_DEMO, True, self.ajustes
             )
 
         self.assertFalse(resultado["ok"])
         self.assertEqual(resultado["error"]["tipo"], "interfaz_no_autorizada")
+        self.assertIn("ether2", resultado["error"]["mensaje"])
         self.assertIn("ether4", resultado["error"]["mensaje"])
         self.assertFalse(resultado["changed"])
         mock.assert_not_called()

@@ -9,6 +9,7 @@ REQUERIDAS = {".id", "chain", "action", "src-address", "dst-address", "disabled"
 OPCIONALES = {"dynamic", "invalid", "log", "log-prefix"}
 FALSOS = {"false", "no"}
 BOOLEANOS = FALSOS | {"true", "yes"}
+MARCA_GESTION = "NETAGENT_LAB_"
 
 
 def procesar_bloqueo(lineas):
@@ -72,4 +73,120 @@ def _interpretar(p, legado=False):
 
 class FilterModule:
     def filters(self):
-        return {"netagent_procesar_bloqueo": procesar_bloqueo}
+        return {
+            "netagent_procesar_bloqueo": procesar_bloqueo,
+            "netagent_procesar_gestion_bloqueo": procesar_gestion_bloqueo,
+        }
+
+
+def procesar_gestion_bloqueo(lineas):
+    """Parsea la salida marcada del playbook de cambio CU-02.
+
+    El parser comparte el mismo transporte y formato de propiedades que la
+    consulta de lectura, pero conserva un contrato mínimo específico para la
+    operación idempotente de una IP.
+    """
+    reglas = []
+    actual = None
+    ip = None
+    accion = None
+    changed = None
+    dentro = False
+    finalizado = False
+
+    for linea in lineas:
+        if finalizado:
+            raise AnsibleFilterError("Salida posterior al marcador final")
+        if linea == "NETAGENT_BEGIN_V1":
+            if dentro:
+                raise AnsibleFilterError("Marcador de inicio duplicado")
+            dentro = True
+        elif linea == "NETAGENT_END_V1":
+            if not dentro or actual is not None:
+                raise AnsibleFilterError("Marcador final inesperado")
+            dentro = False
+            finalizado = True
+        elif not dentro:
+            # Igual que el parser de lectura: se tolera el eco previo del
+            # terminal, pero no texto arbitrario antes del bloque.
+            if not (linea.startswith("<") or linea.startswith(":put ")):
+                raise AnsibleFilterError("Salida inesperada antes del bloque")
+        elif linea == "NETAGENT_RULE_BEGIN_V2" and actual is None:
+            actual = {}
+        elif linea == "NETAGENT_RULE_END_V2" and actual is not None:
+            reglas.append(_interpretar_gestion(actual))
+            actual = None
+        elif linea.startswith("NETAGENT_PROP|") and actual is not None:
+            partes = linea.split("|", 2)
+            if len(partes) != 3 or not partes[1] or partes[1] in actual:
+                raise AnsibleFilterError("Propiedad de regla incompleta o duplicada")
+            actual[partes[1]] = partes[2]
+        elif linea.startswith("NETAGENT_IP|") and actual is None:
+            if ip is not None:
+                raise AnsibleFilterError("IP duplicada")
+            ip = linea.split("|", 1)[1]
+        elif linea.startswith("NETAGENT_ACTION|") and actual is None:
+            if accion is not None:
+                raise AnsibleFilterError("Acción duplicada")
+            accion = linea.split("|", 1)[1]
+        elif linea.startswith("NETAGENT_CHANGED|") and actual is None:
+            if changed is not None:
+                raise AnsibleFilterError("Estado changed duplicado")
+            valor = linea.split("|", 1)[1].lower()
+            if valor not in {"true", "false"}:
+                raise AnsibleFilterError("Estado changed inválido")
+            changed = valor == "true"
+        else:
+            raise AnsibleFilterError("Bloque de cambio incompleto o inesperado")
+
+    if dentro or actual is not None or ip is None or accion not in {"bloquear", "permitir"}:
+        raise AnsibleFilterError("Respuesta de cambio incompleta")
+    if changed is None:
+        raise AnsibleFilterError("Falta el estado changed")
+
+    objetivo = [regla for regla in reglas if regla["comment"] == f"{MARCA_GESTION}{ip}"]
+    bloqueada = len(objetivo) == 1 and _regla_gestion_valida(objetivo[0], ip)
+    if accion == "bloquear":
+        verified = bloqueada
+    else:
+        bloqueada = False
+        verified = not objetivo
+
+    return {
+        "ok": True,
+        "equipo": "R1",
+        "ip": ip,
+        "bloqueada": bloqueada,
+        "changed": changed,
+        "verified": verified,
+        "error": None,
+    }
+
+
+def _interpretar_gestion(propiedades):
+    requeridas = {".id", "chain", "action", "src-address", "dst-address", "disabled", "comment"}
+    if propiedades.get("disabled") not in BOOLEANOS:
+        raise AnsibleFilterError("Estado de regla ausente o desconocido")
+    return {
+        ".id": propiedades.get(".id", ""),
+        "chain": propiedades.get("chain", ""),
+        "action": propiedades.get("action", ""),
+        "src-address": propiedades.get("src-address", ""),
+        "dst-address": propiedades.get("dst-address", ""),
+        "disabled": propiedades["disabled"],
+        "comment": propiedades.get("comment", ""),
+        "propiedades_faltantes": sorted(requeridas - set(propiedades)),
+    }
+
+
+def _regla_gestion_valida(regla, ip):
+    return (
+        not regla["propiedades_faltantes"]
+        and bool(regla[".id"])
+        and regla["chain"] == "forward"
+        and regla["action"] == "drop"
+        and regla["src-address"] in {ip, f"{ip}/32"}
+        and regla["dst-address"] in {"172.16.100.10", "172.16.100.10/32"}
+        and regla["disabled"] in FALSOS
+        and regla["comment"].startswith(MARCA_GESTION)
+    )

@@ -117,10 +117,10 @@ class PruebaPlanEscritura(unittest.TestCase):
         self.assertIn("confirmacion=True", texto)
         self.assertIn("Releer", texto)
 
-    def test_sw1_y_ether2_siguen_rechazados_al_planificar(self):
+    def test_sw1_y_ether3_siguen_rechazados_al_planificar(self):
         casos = (
             {"equipo": "sw1"},
-            {"interfaz": "ether2"},
+            {"interfaz": "ether3"},
         )
         for cambio in casos:
             with self.subTest(cambio=cambio):

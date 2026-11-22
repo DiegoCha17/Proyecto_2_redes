@@ -25,11 +25,13 @@ from typing import Any, Mapping
 
 from agente.catalogo import (
     CONSULTAR_INVENTARIO,
+    GESTIONAR_BLOQUEO,
     RIESGO_ESCRITURA,
     RIESGO_LECTURA,
     Catalogo,
     catalogo_por_defecto,
 )
+from agente.autorizacion_cu02 import preparar_propuesta_gestionar
 from config.ajustes import Ajustes, Dispositivo, ErrorConfiguracion
 from herramientas.comun import ErrorHerramienta, validar_comentario, validar_nombre_interfaz
 
@@ -97,7 +99,12 @@ def resolver_equipo(ajustes: Ajustes, equipo: str) -> Dispositivo:
 
 
 def resolver_interfaz(dispositivo: Dispositivo, interfaz: str) -> str:
-    """Valida el nombre y comprueba que la interfaz esté en el catálogo cerrado."""
+    """Valida el nombre y comprueba que la interfaz esté en el catálogo cerrado.
+
+    El catálogo lo define ``config/dispositivos.yml``: en el laboratorio R1
+    autoriza ``ether2`` y ``ether4`` para ``actualizar_comentario``; SW1 no
+    autoriza ninguna. Aquí no se repite esa lista ni se admiten excepciones.
+    """
     nombre = validar_nombre_interfaz(interfaz)
     if not dispositivo.interfaz_autorizada(nombre):
         autorizadas = ", ".join(dispositivo.interfaces_autorizadas) or "(ninguna)"
@@ -141,6 +148,37 @@ def preparar(
 
     dispositivo = resolver_equipo(ajustes, limpios["equipo"])
     aprobacion = requiere_aprobacion_humana(definicion.riesgo)
+
+    if definicion.nombre == GESTIONAR_BLOQUEO:
+        try:
+            propuesta = preparar_propuesta_gestionar(limpios)
+        except ValueError as exc:
+            raise ErrorHerramienta("parametros_invalidos", str(exc)) from exc
+        if dispositivo.clave != propuesta.equipo:
+            raise ErrorHerramienta(
+                "dispositivo_no_autorizado", "La gestión de firewall solo permite R1"
+            )
+        try:
+            objetivo = ajustes.politica_bloqueo.validar_objetivo(propuesta.ip)
+        except ErrorConfiguracion as exc:
+            raise ErrorHerramienta("ip_no_autorizada", str(exc)) from exc
+        ip_normalizada = str(objetivo)
+        return Accion(
+            herramienta=definicion.nombre,
+            riesgo=definicion.riesgo,
+            clave=dispositivo.clave,
+            equipo=dispositivo.nombre,
+            descripcion=(
+                f"{propuesta.accion.capitalize()} el bloqueo de {ip_normalizada} en "
+                f"{dispositivo.nombre} (regla NETAGENT_LAB_{ip_normalizada})"
+            ),
+            requiere_aprobacion=aprobacion,
+            argumentos={
+                "equipo": dispositivo.clave,
+                "ip": ip_normalizada,
+                "accion": propuesta.accion,
+            },
+        )
 
     if definicion.nombre == "consultar_bloqueo":
         if dispositivo.clave != "r1":

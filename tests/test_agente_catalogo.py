@@ -6,6 +6,7 @@ import unittest
 
 from agente.catalogo import (
     ACTUALIZAR_COMENTARIO,
+    GESTIONAR_BLOQUEO,
     CONSULTAR_INTERFACES,
     CONSULTAR_INVENTARIO,
     RIESGO_ESCRITURA,
@@ -50,12 +51,13 @@ class PruebaCatalogoPorDefecto(unittest.TestCase):
         catalogo = catalogo_por_defecto()
         self.assertEqual(
             set(catalogo.nombres()),
-            {CONSULTAR_INTERFACES, CONSULTAR_INVENTARIO, ACTUALIZAR_COMENTARIO, "consultar_bloqueo"},
+            {CONSULTAR_INTERFACES, CONSULTAR_INVENTARIO, ACTUALIZAR_COMENTARIO, "consultar_bloqueo", GESTIONAR_BLOQUEO},
         )
         self.assertEqual(catalogo.obtener(CONSULTAR_INTERFACES).riesgo, RIESGO_LECTURA)
         self.assertEqual(
             catalogo.obtener(ACTUALIZAR_COMENTARIO).riesgo, RIESGO_ESCRITURA
         )
+        self.assertEqual(catalogo.obtener(GESTIONAR_BLOQUEO).riesgo, RIESGO_ESCRITURA)
 
     def test_esquemas_sirven_para_function_calling(self):
         catalogo = catalogo_por_defecto()
@@ -79,6 +81,15 @@ class PruebaCatalogoPorDefecto(unittest.TestCase):
             catalogo_por_defecto().obtener(ACTUALIZAR_COMENTARIO).esquema()["function"]
         )["parameters"]
         self.assertEqual(set(parametros["properties"]), {"equipo", "interfaz", "comentario"})
+        self.assertNotIn("confirmacion", parametros["properties"])
+
+    def test_gestionar_bloqueo_declara_esquema_cerrado(self):
+        parametros = (
+            catalogo_por_defecto().obtener(GESTIONAR_BLOQUEO).esquema()["function"]
+        )["parameters"]
+        self.assertEqual(set(parametros["properties"]), {"equipo", "ip", "accion"})
+        self.assertEqual(parametros["properties"]["equipo"]["enum"], ["r1"])
+        self.assertEqual(parametros["properties"]["accion"]["enum"], ["bloquear", "permitir"])
         self.assertNotIn("confirmacion", parametros["properties"])
 
 

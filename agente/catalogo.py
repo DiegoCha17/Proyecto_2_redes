@@ -10,9 +10,9 @@ acepta no puedan divergir.
 Principios:
   * Falla cerrado: un nombre o un argumento que no figure aquí se rechaza con
     :class:`herramientas.comun.ErrorHerramienta` antes de tocar nada.
-  * No recibe comandos: el único verbo de escritura es cambiar el comentario de
-    una interfaz ya autorizada por ``config/dispositivos.yml``; el comando
-    RouterOS lo construye :mod:`herramientas.comun`.
+  * No recibe comandos: las escrituras son únicamente el comentario de una
+    interfaz autorizada por ``config/dispositivos.yml`` y la gestión CU-02 por
+    el playbook Ansible cerrado; no se acepta texto RouterOS libre.
   * La aprobación humana **no** viaja en los argumentos: ``confirmacion`` solo
     se puede pasar como opción de invocación desde :mod:`agente.ejecutar`.
   * Los adaptadores solo traducen el vocabulario del catálogo al de las
@@ -30,7 +30,10 @@ from config.ajustes import Ajustes, obtener_ajustes
 from herramientas.actualizar_comentario import actualizar_comentario
 from herramientas.comun import ErrorHerramienta
 from herramientas.estado_interfaces import consultar
-from agente.consulta_ansible import consultar_bloqueo as _consultar_bloqueo
+from agente.consulta_ansible import (
+    consultar_bloqueo as _consultar_bloqueo,
+    gestionar_bloqueo as _gestionar_bloqueo,
+)
 
 # --- Riesgo de una herramienta ----------------------------------------------
 # Solo las de riesgo "escritura" exigen aprobación humana explícita.
@@ -42,6 +45,7 @@ RIESGOS = frozenset({RIESGO_LECTURA, RIESGO_ESCRITURA})
 CONSULTAR_INTERFACES = "consultar_interfaces"
 CONSULTAR_INVENTARIO = "consultar_inventario"
 CONSULTAR_BLOQUEO = "consultar_bloqueo"
+GESTIONAR_BLOQUEO = "gestionar_bloqueo"
 ACTUALIZAR_COMENTARIO = "actualizar_comentario"
 
 
@@ -94,6 +98,23 @@ def _actualizar_comentario(
         equipo,
         interfaz,
         comentario,
+        confirmacion=confirmacion,
+        ajustes=ajustes,
+    )
+
+
+def _gestionar_bloqueo_catalogo(
+    equipo: str,
+    ip: str,
+    accion: str,
+    confirmacion: bool = False,
+    ajustes: Ajustes | None = None,
+) -> dict[str, Any]:
+    """Adaptador de la escritura CU-02 con aprobación inyectada por ejecutar."""
+    return _gestionar_bloqueo(
+        equipo,
+        ip,
+        accion,
         confirmacion=confirmacion,
         ajustes=ajustes,
     )
@@ -185,6 +206,13 @@ class DefinicionHerramienta:
                 raise ErrorHerramienta(
                     "argumentos_invalidos",
                     f"El argumento {clave!r} de {self.nombre!r} debe ser texto",
+                )
+            enumeracion = self.parametros.get(str(clave), {}).get("enum")
+            if enumeracion is not None and valor not in enumeracion:
+                valores = ", ".join(map(str, enumeracion))
+                raise ErrorHerramienta(
+                    "argumentos_invalidos",
+                    f"El argumento {clave!r} de {self.nombre!r} debe ser uno de: {valores}",
                 )
             limpios[str(clave)] = valor
         return limpios
@@ -341,6 +369,36 @@ def catalogo_por_defecto() -> Catalogo:
             ),
             Herramienta(
                 definicion=DefinicionHerramienta(
+                    nombre=GESTIONAR_BLOQUEO,
+                    descripcion=(
+                        "Bloquea o permite una IPv4 LAN en R1 mediante la regla "
+                        "administrada de NetAgent-IA. Es una escritura idempotente, "
+                        "requiere aprobación humana y verifica el estado posterior."
+                    ),
+                    riesgo=RIESGO_ESCRITURA,
+                    parametros={
+                        "equipo": {
+                            "type": "string",
+                            "enum": ["r1"],
+                            "description": "Clave del equipo R1",
+                        },
+                        "ip": {
+                            "type": "string",
+                            "format": "ipv4",
+                            "description": "IPv4 de la LAN autorizada por la política",
+                        },
+                        "accion": {
+                            "type": "string",
+                            "enum": ["bloquear", "permitir"],
+                            "description": "Operación solicitada",
+                        },
+                    },
+                    obligatorios=("equipo", "ip", "accion"),
+                ),
+                funcion=_gestionar_bloqueo_catalogo,
+            ),
+            Herramienta(
+                definicion=DefinicionHerramienta(
                     nombre=ACTUALIZAR_COMENTARIO,
                     descripcion=(
                         "Cambia únicamente el comentario de una interfaz incluida en "
@@ -361,7 +419,7 @@ def catalogo_por_defecto() -> Catalogo:
                             "type": "string",
                             "description": (
                                 "Interfaz autorizada del equipo; en el laboratorio solo "
-                                "ether4 de R1"
+                                "ether2 y ether4 de R1"
                             ),
                         },
                         "comentario": {

@@ -65,8 +65,10 @@ MENSAJE_SISTEMA = (
     "ese estado y distingue down de disabled.\n"
     "5. Nunca reveles ni solicites credenciales, claves de API, variables de "
     "entorno, direcciones IP de gestión ni volcados técnicos de los equipos.\n"
-    "6. Si piden algo fuera del catálogo (bloqueos de IP, reinicios, cambios de "
-    "direcciones, firewall, VLAN, usuarios…), explica que no está disponible.\n"
+    "6. Para gestionar un bloqueo de IP usa gestionar_bloqueo solo con R1, una IPv4 "
+    "LAN y accion bloquear o permitir; la aprobación siempre la da la persona. "
+    "Para lo demás fuera del catálogo (reinicios, cambios de direcciones, VLAN, "
+    "usuarios…), explica que no está disponible.\n"
 )
 
 

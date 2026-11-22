@@ -318,9 +318,9 @@ topología GNS3 estaba detenida (los equipos no responden en el puerto 22).
 4. **Política de bloqueo en la configuración, no en el prompt**: el agente no
    decide qué IPs son protegidas; `validar_objetivo()` lo impone.
 5. **Catálogo de interfaces cerrado**: `actualizar_comentario.py` solo acepta
-   interfaces listadas en `config/dispositivos.yml`. Hoy R1 autoriza únicamente
-   `ether4` (demostración); SW1 mantiene la lista vacía y, por tanto, rechaza
-   cualquier cambio. Una interfaz fuera del catálogo no abre conexión.
+   interfaces listadas en `config/dispositivos.yml`. Hoy R1 autoriza `ether2`
+   (CU-03) y `ether4` (demostración); SW1 mantiene la lista vacía y, por tanto,
+   rechaza cualquier cambio. Una interfaz fuera del catálogo no abre conexión.
 6. **Verificación de solo lectura**: no se envía ni un comando a los equipos ni
    se modifica GNS3; la comprobación de red es una conexión TCP.
 
@@ -535,7 +535,7 @@ cambio y las garantías frente a cambios concurrentes siguen pendientes.
 ### Pendientes conocidos
 
 * Ampliar `config/dispositivos.yml` → `interfaces_autorizadas` solo cuando se
-  autorice otra interfaz. Hoy R1 permite únicamente `ether4`; SW1 sigue vacío
+  autorice otra interfaz. Hoy R1 permite `ether2` y `ether4`; SW1 sigue vacío
   (falla cerrada). Los nombres reales se validan con `estado_interfaces.py`.
 * Mantener `.env` (ya presente en el entorno local) fuera de Git y con
   permisos restrictivos; las pruebas unitarias no usan las credenciales reales.

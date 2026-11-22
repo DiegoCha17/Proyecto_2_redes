@@ -23,4 +23,4 @@ ansible_connect_timeout: 30
 
 # Solo se permite leer y modificar configuración mediante los playbooks
 # autorizados del proyecto; no se habilitan comandos arbitrarios.
-ansible_network_cli_ssh_type: paramiko
+ansible_network_cli_ssh_type: libssh

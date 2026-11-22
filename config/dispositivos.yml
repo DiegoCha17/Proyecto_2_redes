@@ -37,10 +37,12 @@ dispositivos:
     puerto_ssh: 22
     grupo_ansible: "mikrotik"
     # Catálogo cerrado de interfaces cuyo comentario puede modificarse.
-    # Solo ether4 para la demostración de la Etapa 2; se amplía aquí, nunca en
-    # el código, tras validar los nombres reales con estado_interfaces.py.
-    # Cualquier interfaz ausente de esta lista es rechazada (falla cerrada).
+    # CU-03 del P1 exige actualizar ether2; ether4 se conserva de la
+    # demostración de la Etapa 2. Se amplía aquí, nunca en el código, tras
+    # validar los nombres reales con estado_interfaces.py. Cualquier interfaz
+    # ausente de esta lista es rechazada (falla cerrada).
     interfaces_autorizadas:
+      - "ether2"
       - "ether4"
 
   sw1:

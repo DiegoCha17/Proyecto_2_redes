@@ -1,0 +1,78 @@
+---
+# El módulo community.routeros.command devuelve stdout como lista, una entrada
+# por comando. stdout_lines ya contiene todos los fragmentos/saltos de línea;
+# se aplanan todos, nunca se usa stdout[0].
+
+- name: Normalizar prelectura
+  ansible.builtin.set_fact:
+    pre_lineas: >-
+      {{ pre_lectura.stdout_lines | default([]) | flatten
+         | map('trim') | reject('equalto', '') | list }}
+  when: netagent_fase | default('post') == 'pre'
+  no_log: false
+
+- name: Validar marcadores de prelectura
+  ansible.builtin.assert:
+    that:
+      - pre_lineas | length >= 2
+      - pre_lineas | select('equalto', 'NETAGENT_BEGIN_V1') | list | length == 1
+      - pre_lineas | select('equalto', 'NETAGENT_END_V1') | list | length == 1
+      - pre_lineas[-1] == 'NETAGENT_END_V1'
+  when: netagent_fase | default('post') == 'pre'
+  no_log: true
+
+- name: Calcular estado previo
+  ansible.builtin.set_fact:
+    bloqueada_antes: >-
+      {{ (pre_lineas | select('equalto', 'NETAGENT_RULE_BEGIN_V2')
+          | list | length) > 0 }}
+  when: netagent_fase | default('post') == 'pre'
+  no_log: true
+
+- name: Normalizar poslectura
+  ansible.builtin.set_fact:
+    post_lineas: >-
+      {{ post_lectura.stdout_lines | default([]) | flatten
+         | map('trim') | reject('equalto', '') | list }}
+  when: netagent_fase | default('post') == 'post'
+  no_log: false
+
+- name: Validar marcadores de poslectura
+  ansible.builtin.assert:
+    that:
+      - post_lineas | length >= 2
+      - post_lineas | select('equalto', 'NETAGENT_BEGIN_V1') | list | length == 1
+      - post_lineas | select('equalto', 'NETAGENT_END_V1') | list | length == 1
+      - post_lineas[-1] == 'NETAGENT_END_V1'
+  when: netagent_fase | default('post') == 'post'
+  no_log: true
+
+- name: Calcular estado final
+  ansible.builtin.set_fact:
+    bloqueada_despues: >-
+      {{ (post_lineas | select('equalto', 'NETAGENT_RULE_BEGIN_V2')
+          | list | length) > 0 }}
+  when: netagent_fase | default('post') == 'post'
+  no_log: true
+
+- name: Calcular cambio y verificación
+  ansible.builtin.set_fact:
+    netagent_changed: "{{ (bloqueada_antes | bool) != (bloqueada_despues | bool) }}"
+    netagent_verified: >-
+      {{ (accion == 'bloquear' and (bloqueada_despues | bool))
+         or (accion == 'permitir' and not (bloqueada_despues | bool)) }}
+  when: netagent_fase | default('post') == 'post'
+  no_log: true
+
+- name: Construir contrato final de gestión
+  ansible.builtin.set_fact:
+    netagent_resultado:
+      ok: true
+      equipo: R1
+      ip: "{{ ip }}"
+      bloqueada: "{{ bloqueada_despues | bool }}"
+      changed: "{{ netagent_changed | bool }}"
+      verified: "{{ netagent_verified | bool }}"
+      error: null
+  when: netagent_fase | default('post') == 'post'
+  no_log: true

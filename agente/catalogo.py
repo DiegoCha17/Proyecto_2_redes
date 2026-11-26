@@ -322,9 +322,10 @@ def catalogo_por_defecto() -> Catalogo:
             Herramienta(
                 definicion=DefinicionHerramienta(
                     nombre=CONSULTAR_BLOQUEO,
-                    descripcion="Consulta en R1 la regla configurada para PC1 hacia WAN; no demuestra el bloqueo efectivo y no modifica el firewall.",
+                    descripcion="Consulta en R1 la regla administrada de una IPv4 LAN hacia WAN; por defecto PC1. No demuestra el bloqueo efectivo y no modifica el firewall.",
                     riesgo=RIESGO_LECTURA,
-                    parametros={"equipo": {"type": "string", "description": "Únicamente r1"}},
+                    parametros={"equipo": {"type": "string", "description": "Únicamente r1"},
+                                "ip": {"type": "string", "format": "ipv4", "description": "IPv4 LAN autorizada; opcional, por defecto PC1"}},
                     obligatorios=("equipo",),
                 ),
                 funcion=_consultar_bloqueo,

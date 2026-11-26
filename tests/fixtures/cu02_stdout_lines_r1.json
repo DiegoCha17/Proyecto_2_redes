@@ -1,0 +1,44 @@
+[
+  [
+    "NETAGENT_BEGIN_V1"
+  ],
+  [
+    ":foreach r in=[/ip firewall filter print as-value where c",
+    "< firewall filter print as-value where co                                      ",
+    "< firewall filter print as-value where comment=\"NETAGENT_LAB_192.168.10.50\"] do",
+    "< firewall filter print as-value where comment=\"NETAGENT_LAB_192.168.10.50\"] d>",
+    "<omment=\"NETAGENT_LAB_192.168.10.50\"] do=                                      ",
+    "<omment=\"NETAGENT_LAB_192.168.10.50\"] do={ :put \"NETAGENT_RULE_BEGIN_V2\"; :fore",
+    "<omment=\"NETAGENT_LAB_192.168.10.50\"] do={ :put \"NETAGENT_RULE_BEGIN_V2\"; :for>",
+    "<={ :put \"NETAGENT_RULE_BEGIN_V2\"; :forea                                      ",
+    "<={ :put \"NETAGENT_RULE_BEGIN_V2\"; :foreach k,v in=$r do={ :put (\"NETAGENT_PROP",
+    "<={ :put \"NETAGENT_RULE_BEGIN_V2\"; :foreach k,v in=$r do={ :put (\"NETAGENT_PRO>",
+    "<ach k,v in=$r do={ :put (\"NETAGENT_PROP|                                      ",
+    "<ach k,v in=$r do={ :put (\"NETAGENT_PROP|\" . $k . \"|\" . [:tostr $v]) }; :put \"N",
+    "<ach k,v in=$r do={ :put (\"NETAGENT_PROP|\" . $k . \"|\" . [:tostr $v]) }; :put \">",
+    "<|\" . $k . \"|\" . [:tostr $v]) }; :put \"NE                                      ",
+    "<|\" . $k . \"|\" . [:tostr $v]) }; :put \"NETAGENT_RULE_END_V2\" }",
+    "<|\" . $k . \"|\" . [:tostr $v]) }; :put \"NETAGENT_RULE_END_V2\" }"
+  ],
+  [
+    ":foreach r in=[/ip firewall filter print as-value where c",
+    "< firewall filter print as-value where co                                      ",
+    "< firewall filter print as-value where comment=\"NetAgent-IA:CU02:PC1-WAN\"] do={",
+    "< firewall filter print as-value where comment=\"NetAgent-IA:CU02:PC1-WAN\"] do=>",
+    "<omment=\"NetAgent-IA:CU02:PC1-WAN\"] do={                                       ",
+    "<omment=\"NetAgent-IA:CU02:PC1-WAN\"] do={ :put \"NETAGENT_RULE_BEGIN_V2\"; :foreac",
+    "<omment=\"NetAgent-IA:CU02:PC1-WAN\"] do={ :put \"NETAGENT_RULE_BEGIN_V2\"; :forea>",
+    "< :put \"NETAGENT_RULE_BEGIN_V2\"; :foreach                                      ",
+    "< :put \"NETAGENT_RULE_BEGIN_V2\"; :foreach k,v in=$r do={ :put (\"NETAGENT_PROP|\"",
+    "< :put \"NETAGENT_RULE_BEGIN_V2\"; :foreach k,v in=$r do={ :put (\"NETAGENT_PROP|>",
+    "<h k,v in=$r do={ :put (\"NETAGENT_PROP|\"                                       ",
+    "<h k,v in=$r do={ :put (\"NETAGENT_PROP|\" . $k . \"|\" . [:tostr $v]) }; :put \"NET",
+    "<h k,v in=$r do={ :put (\"NETAGENT_PROP|\" . $k . \"|\" . [:tostr $v]) }; :put \"NE>",
+    "< . $k . \"|\" . [:tostr $v]) }; :put \"NETA                                      ",
+    "< . $k . \"|\" . [:tostr $v]) }; :put \"NETAGENT_RULE_END_V2\" }",
+    "< . $k . \"|\" . [:tostr $v]) }; :put \"NETAGENT_RULE_END_V2\" }"
+  ],
+  [
+    "NETAGENT_END_V1"
+  ]
+]

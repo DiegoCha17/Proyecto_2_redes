@@ -183,10 +183,16 @@ def preparar(
     if definicion.nombre == "consultar_bloqueo":
         if dispositivo.clave != "r1":
             raise ErrorHerramienta("dispositivo_no_autorizado", "La consulta de firewall solo permite R1")
+        argumentos_consulta = {"equipo": dispositivo.clave}
+        if "ip" in limpios:
+            try:
+                argumentos_consulta["ip"] = str(ajustes.politica_bloqueo.validar_objetivo(limpios["ip"]))
+            except ErrorConfiguracion as exc:
+                raise ErrorHerramienta("ip_no_autorizada", str(exc)) from exc
         return Accion(herramienta=definicion.nombre, riesgo=definicion.riesgo,
                       clave=dispositivo.clave, equipo=dispositivo.nombre,
-                      descripcion="Consultar la regla de PC1 hacia WAN en R1 (solo lectura)",
-                      requiere_aprobacion=False, argumentos={"equipo": dispositivo.clave})
+                      descripcion="Consultar la regla administrada hacia WAN en R1 (solo lectura)",
+                      requiere_aprobacion=False, argumentos=argumentos_consulta)
 
     if definicion.riesgo == RIESGO_LECTURA:
         return Accion(

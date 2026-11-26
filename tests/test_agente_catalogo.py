@@ -72,9 +72,10 @@ class PruebaCatalogoPorDefecto(unittest.TestCase):
                 self.assertFalse(parametros["additionalProperties"])
                 for obligatorio in parametros["required"]:
                     self.assertIn(obligatorio, parametros["properties"])
-                self.assertEqual(
-                    set(parametros["required"]), set(parametros["properties"])
-                )
+                if esquema["function"]["name"] == "consultar_bloqueo":
+                    self.assertEqual(set(parametros["properties"]) - set(parametros["required"]), {"ip"})
+                else:
+                    self.assertEqual(set(parametros["required"]), set(parametros["properties"]))
 
     def test_la_escritura_solo_admite_equipo_interfaz_y_comentario(self):
         parametros = (

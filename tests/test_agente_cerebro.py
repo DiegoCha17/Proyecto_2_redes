@@ -358,6 +358,24 @@ class PruebaFlujoEscritura(BaseCerebro):
 
 
 class PruebaErroresYLimites(BaseCerebro):
+    def test_negacion_de_cambio_de_comentario_no_consulta_ni_propone(self):
+        funcion = FuncionFalsa(ESCRITURA_OK)
+        cerebro = self.construir(respuesta_escritura(), {ACTUALIZAR_COMENTARIO: funcion})
+        respuesta = cerebro.procesar('No cambia el comentario de ether2 en R1 a demo')
+        self.assertFalse(respuesta.ok)
+        self.assertEqual(respuesta.error['tipo'], 'solicitud_ambigua')
+        self.assertEqual(self.proveedor.llamadas, [])
+        self.assertEqual(funcion.llamadas, [])
+
+    def test_respuesta_modelo_oculta_secretos_configurados(self):
+        secreto = ENTORNO_PRUEBA['NETAGENT_R1_CLAVE']
+        cerebro = self.construir(RespuestaModelo(texto=f'Dato: {secreto}'),
+                                 {CONSULTAR_INTERFACES: FuncionFalsa(LECTURA_OK)})
+        respuesta = cerebro.procesar('Explica la función del agente.')
+        self.assertNotIn(secreto, respuesta.texto)
+        self.assertIn('<oculto>', respuesta.texto)
+        self.assertNotIn(secreto, Path(cerebro.ruta_registro).read_text(encoding='utf-8'))
+
     def test_mensaje_conversacional(self):
         cerebro = self.construir(
             RespuestaModelo(texto="R1 es el router de borde."),

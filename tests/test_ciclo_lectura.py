@@ -89,6 +89,13 @@ class PruebaCicloLectura(unittest.TestCase):
         self.assertEqual([e["function"]["name"] for e in proveedor.esquemas[1]],
                          [CONSULTAR_INTERFACES, ACTUALIZAR_COMENTARIO])
 
+    def test_respuesta_con_historial_oculta_secretos_configurados(self):
+        secreto = ENTORNO_PRUEBA['NETAGENT_R1_CLAVE']
+        cerebro, _ = self.construir([RespuestaModelo(texto=f'Dato: {secreto}')])
+        respuesta = cerebro.procesar('Explica la función del agente.')
+        self.assertNotIn(secreto, respuesta.texto)
+        self.assertIn('<oculto>', respuesta.texto)
+
     def test_observa_consulta_firewall_sin_afirmar_bloqueo_efectivo(self):
         salida = {'ok': True, 'equipo': 'R1', 'origen': '192.168.10.50',
                   'destino': '172.16.100.10', 'bloqueo_configurado': False,

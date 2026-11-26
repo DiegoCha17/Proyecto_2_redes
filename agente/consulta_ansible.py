@@ -76,12 +76,22 @@ def consultar_bloqueo(
                 or dato.get("equipo") != "R1" or dato.get("origen") != origen_esperado
                 or dato.get("destino") != "172.16.100.10" or "bloqueo_efectivo" not in dato
                 or dato["bloqueo_efectivo"] is not None
-                or any(type(dato.get(k)) is not bool for k in campos)):
+                or dato.get("error", "ausente") is not None
+                or type(dato.get("existe")) is not bool
+                or any(type(dato.get(k)) is not bool for k in campos if k != "regla_administrada_existente")
+                or ("regla_administrada_existente" in dato and
+                    (type(dato["regla_administrada_existente"]) is not bool or
+                     dato["regla_administrada_existente"] != dato["existe"]))
+                or not isinstance(dato.get("reglas"), list)
+                or dato["existe"] != bool(dato["reglas"])
+                or dato["reglas_duplicadas"] != (len(dato["reglas"]) > 1)):
             raise ValueError("resultado inválido")
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise ErrorHerramienta("respuesta_ansible_invalida", "Respuesta Ansible incompleta o inválida") from exc
     return {"ok": True, "equipo": "R1", "origen": origen_esperado, "destino": "172.16.100.10",
-            **{k: dato[k] for k in campos}, "bloqueo_efectivo": None, "changed": False, "error": None}
+            **{k: dato[k] for k in campos if k != "regla_administrada_existente"},
+            "regla_administrada_existente": dato["existe"],
+            "bloqueo_efectivo": None, "changed": False, "error": None}
 
 
 def gestionar_bloqueo(

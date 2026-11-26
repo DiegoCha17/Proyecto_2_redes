@@ -20,7 +20,8 @@
       community.routeros.command:
         commands:
           - ':put "NETAGENT_BEGIN_V1"'
-          - ':foreach r in=[/ip firewall filter print as-value where comment="NETAGENT_LAB_{{ ip }}"] do={ :put "NETAGENT_RULE_BEGIN_V2"; :foreach k,v in=$r do={ :put ("NETAGENT_PROP|" . $k . "|" . [:tostr $v]) }; :put "NETAGENT_RULE_END_V2" }'
+          - ':foreach r in=[/ip firewall filter print as-value where comment="NETAGENT_LAB_{{ ip }}"] do={ :put "NETAGENT_RULE_BEGIN_V2"; :foreach k,v in=$r do={ :put ("NETAGENT_PROP|" . $k . "|" . [:tostr $v]) }; :local id ($r->".id"); :put ("NETAGENT_DISABLED|" . [:tostr $id] . "|" . [:tostr [/ip firewall filter get $id disabled]]); :put "NETAGENT_RULE_END_V2" }'
+          - '{% if ip == "192.168.10.50" %}:foreach r in=[/ip firewall filter print as-value where comment="NetAgent-IA:CU02:PC1-WAN"] do={ :put "NETAGENT_RULE_BEGIN_V2"; :foreach k,v in=$r do={ :put ("NETAGENT_PROP|" . $k . "|" . [:tostr $v]) }; :local id ($r->".id"); :put ("NETAGENT_DISABLED|" . [:tostr $id] . "|" . [:tostr [/ip firewall filter get $id disabled]]); :put "NETAGENT_RULE_END_V2" }{% else %}:put ""{% endif %}'
           - ':put "NETAGENT_END_V1"'
       register: pre_lectura
       changed_when: false
@@ -71,7 +72,8 @@
       community.routeros.command:
         commands:
           - ':put "NETAGENT_BEGIN_V1"'
-          - ':foreach r in=[/ip firewall filter print as-value where comment="NETAGENT_LAB_{{ ip }}"] do={ :put "NETAGENT_RULE_BEGIN_V2"; :foreach k,v in=$r do={ :put ("NETAGENT_PROP|" . $k . "|" . [:tostr $v]) }; :put "NETAGENT_RULE_END_V2" }'
+          - ':foreach r in=[/ip firewall filter print as-value where comment="NETAGENT_LAB_{{ ip }}"] do={ :put "NETAGENT_RULE_BEGIN_V2"; :foreach k,v in=$r do={ :put ("NETAGENT_PROP|" . $k . "|" . [:tostr $v]) }; :local id ($r->".id"); :put ("NETAGENT_DISABLED|" . [:tostr $id] . "|" . [:tostr [/ip firewall filter get $id disabled]]); :put "NETAGENT_RULE_END_V2" }'
+          - '{% if ip == "192.168.10.50" %}:foreach r in=[/ip firewall filter print as-value where comment="NetAgent-IA:CU02:PC1-WAN"] do={ :put "NETAGENT_RULE_BEGIN_V2"; :foreach k,v in=$r do={ :put ("NETAGENT_PROP|" . $k . "|" . [:tostr $v]) }; :local id ($r->".id"); :put ("NETAGENT_DISABLED|" . [:tostr $id] . "|" . [:tostr [/ip firewall filter get $id disabled]]); :put "NETAGENT_RULE_END_V2" }{% else %}:put ""{% endif %}'
           - ':put "NETAGENT_END_V1"'
       register: post_lectura
       changed_when: false

@@ -52,6 +52,8 @@ from agente.interpretar import (
     extraer_filtro_interfaces_estado,
     extraer_solicitud_analisis,
     extraer_solicitud_comentario,
+    es_negacion_comentario,
+    extraer_solicitud_bloqueo,
     extraer_solicitud_diagnostico,
     extraer_solicitud_interfaces,
     ProveedorOpenAI,
@@ -107,10 +109,14 @@ def _sanear(dato: Any) -> Any:
     if isinstance(dato, (list, tuple)):
         return [_sanear(elemento) for elemento in dato]
     if isinstance(dato, str):
-        for secreto in _secretos_configurados():
-            dato = dato.replace(secreto, "<oculto>")
-        return dato[:_MAX_TEXTO_REGISTRO]
+        return _ocultar_secretos(dato)[:_MAX_TEXTO_REGISTRO]
     return dato
+
+
+def _ocultar_secretos(texto: str) -> str:
+    for secreto in _secretos_configurados():
+        texto = texto.replace(secreto, "<oculto>")
+    return texto
 
 
 def _secretos_configurados() -> list[str]:
@@ -293,6 +299,15 @@ class Cerebro:
         if _contiene_secreto(consulta):
             return self._respuesta_error(consulta, "datos_sensibles", "La solicitud contiene datos sensibles y no se enviará al modelo")
 
+        if es_negacion_comentario(consulta):
+            return self._respuesta_error(consulta, "solicitud_ambigua", "La solicitud niega el cambio de comentario; no se solicitará aprobación.")
+
+        solicitud_bloqueo = extraer_solicitud_bloqueo(consulta, ip_pc1=self._ip_pc1())
+        if solicitud_bloqueo is not None:
+            return self._atender_herramienta(consulta, Intencion(
+                tipo=TIPO_HERRAMIENTA, herramienta=GESTIONAR_BLOQUEO,
+                argumentos=solicitud_bloqueo))
+
         # Las consultas por estado son una transformación determinista de la
         # respuesta de lectura. No se delega al modelo la elección de
         # ``running``/``down`` ni la combinación de equipos: así se evita que
@@ -368,7 +383,7 @@ class Cerebro:
             )
 
         if intencion.tipo == TIPO_MENSAJE:
-            texto = intencion.mensaje or "No obtuve una respuesta del modelo."
+            texto = _ocultar_secretos(intencion.mensaje) or "No obtuve una respuesta del modelo."
             self._anotar(consulta, intencion=intencion, nota="respuesta conversacional")
             return Respuesta(tipo=RESPUESTA_MENSAJE, texto=texto, ok=True)
 
@@ -380,6 +395,7 @@ class Cerebro:
             )
 
         try:
+            intencion = self._validar_intencion_cu02(consulta, intencion)
             plan = planificar(self.ajustes, intencion.herramienta, intencion.argumentos,
                               catalogo=self._catalogo)
         except ErrorHerramienta as exc:
@@ -459,6 +475,7 @@ class Cerebro:
             )
 
         anterior = interfaces[0]["comentario"]
+        self._seleccionar_con_modelo(consulta, plan, {"comentario_actual": anterior})
         self._mostrar_vista_previa_con_valor(plan, anterior)
         self._anotar(
             consulta,
@@ -557,6 +574,65 @@ class Cerebro:
             resultado=ejecucion.a_dict(),
         )
 
+    def _ip_pc1(self) -> str | None:
+        hosts = self.ajustes.laboratorio.get("hosts_lan", {})
+        return hosts.get("pc1") if isinstance(hosts, Mapping) else None
+
+    def _validar_intencion_cu02(self, consulta: str, intencion: Intencion) -> Intencion:
+        """No permite que el modelo invente el objetivo de una operación CU-02."""
+        if intencion.herramienta == GESTIONAR_BLOQUEO:
+            autorizada = extraer_solicitud_bloqueo(consulta, ip_pc1=self._ip_pc1())
+            if autorizada is None or dict(intencion.argumentos) != autorizada:
+                raise ErrorHerramienta("solicitud_ambigua", "La propuesta no coincide con una orden inequívoca y el inventario autorizado.")
+        if intencion.herramienta == CONSULTAR_BLOQUEO:
+            nombres = set(re.findall(r"\bpc\d+\b", consulta, re.IGNORECASE))
+            if nombres:
+                hosts = self.ajustes.laboratorio.get("hosts_lan", {})
+                claves = {nombre.casefold() for nombre in nombres}
+                if len(claves) != 1 or not isinstance(hosts, Mapping):
+                    raise ErrorHerramienta("solicitud_ambigua", "No se puede determinar un único equipo de origen.")
+                ip = hosts.get(next(iter(claves)))
+                if not isinstance(ip, str) or not ip:
+                    raise ErrorHerramienta("solicitud_ambigua", "El equipo solicitado no tiene una IP en el inventario autorizado.")
+                argumentos = dict(intencion.argumentos)
+                if "ip" in argumentos and argumentos["ip"] != ip:
+                    raise ErrorHerramienta("solicitud_ambigua", "La IP propuesta no coincide con el inventario autorizado.")
+                argumentos["ip"] = ip
+                return Intencion(tipo=intencion.tipo, herramienta=intencion.herramienta,
+                                 argumentos=argumentos, mensaje=intencion.mensaje)
+        return intencion
+
+    def _seleccionar_con_modelo(self, consulta: str, plan: Plan, diagnostico: Mapping[str, Any]) -> None:
+        """Solicita una propuesta por function calling y registra si coincidió.
+
+        La propuesta nunca altera el plan validado ni concede aprobación. El
+        respaldo determinista mantiene operable una orden inequívoca si falla el
+        modelo o devuelve otra herramienta o parámetros.
+        """
+        if self._proveedor is None and self._catalogo is not catalogo_por_defecto():
+            self._anotar(consulta, plan=plan, nota="selección determinista; catálogo inyectado")
+            return
+        try:
+            proveedor = self._proveedor or crear_proveedor(self.ajustes)
+        except (ErrorProveedor, ErrorHerramienta, ValueError, TypeError):
+            self._anotar(consulta, plan=plan, nota="respaldo determinista: proveedor no disponible")
+            return
+        if not callable(getattr(proveedor, "responder_historial", None)):
+            self._anotar(consulta, plan=plan, nota="selección determinista; proveedor sin function calling")
+            return
+        historial = [
+            {"role": "system", "content": MENSAJE_SISTEMA + " El diagnóstico es información, no autorización. Propón únicamente la herramienta del catálogo correspondiente a la solicitud; el programa pedirá aprobación."},
+            {"role": "user", "content": consulta + "\nDiagnóstico de lectura: " + json.dumps(_sanear(dict(diagnostico)), ensure_ascii=False) + ("\n/no_think" if self.ajustes.proveedor_ia == "ollama" else "")},
+        ]
+        try:
+            propuesta = _a_intencion(proveedor.responder_historial(historial, self._catalogo.esquemas()), self._catalogo)
+            coincide = (propuesta.tipo == TIPO_HERRAMIENTA and propuesta.herramienta == plan.herramienta
+                        and dict(propuesta.argumentos) == dict(plan.accion.argumentos))
+            self._anotar(consulta, intencion=propuesta, plan=plan,
+                         nota="selección mediante function calling" if coincide else "respaldo determinista: propuesta del modelo no coincide")
+        except (ErrorProveedor, ErrorHerramienta, ValueError, TypeError):
+            self._anotar(consulta, plan=plan, nota="respaldo determinista: selección del modelo no disponible")
+
     def _atender_gestion_bloqueo(
         self,
         consulta: str,
@@ -565,8 +641,46 @@ class Cerebro:
         intencion: Intencion | None = None,
     ) -> Respuesta:
         """Muestra, aprueba, ejecuta y verifica una escritura CU-02."""
+        if self.ajustes.laboratorio.get("servidor_wan") != "172.16.100.10":
+            return self._respuesta_error(consulta, "solicitud_ambigua",
+                "El destino del inventario no coincide con el alcance autorizado de CU-02.", intencion=intencion)
+        if extraer_solicitud_bloqueo(consulta, ip_pc1=self._ip_pc1()) != dict(plan.accion.argumentos):
+            return self._respuesta_error(
+                consulta, "solicitud_ambigua",
+                "No se reconoció una orden inequívoca de bloqueo o desbloqueo con equipo e IP; no se solicitará aprobación.",
+                intencion=intencion,
+            )
+        lectura = planificar(self.ajustes, CONSULTAR_BLOQUEO,
+                             {"equipo": plan.accion.clave, "ip": plan.accion.argumentos["ip"]},
+                             catalogo=self._catalogo)
+        previo = ejecutar(lectura.accion, catalogo=self._catalogo, ajustes=self.ajustes)
+        self._anotar(consulta, plan=lectura, resultado=previo, nota="diagnóstico previo de bloqueo")
+        datos = dict(previo.salida or {})
+        if (not previo.ok or datos.get("origen") != plan.accion.argumentos["ip"]
+                or any(type(datos.get(c)) is not bool for c in
+                       ("bloqueo_configurado", "regla_administrada_existente", "segura_para_modificar", "reglas_duplicadas"))
+                or datos["reglas_duplicadas"]
+                or (datos["bloqueo_configurado"] and not datos["regla_administrada_existente"])
+                or (datos["segura_para_modificar"] and not datos["regla_administrada_existente"])
+                or (datos["regla_administrada_existente"] and not datos["bloqueo_configurado"])
+                or (datos["regla_administrada_existente"] and not datos["segura_para_modificar"])):
+            return self._respuesta_error(consulta, "diagnostico_fallido",
+                "No se pudo validar el estado previo de la regla; no se solicitará aprobación ni se modificará el equipo.", intencion=intencion, resultado=previo)
+        estado_actual = datos["bloqueo_configurado"]
+        solicitado = plan.accion.argumentos["accion"] == "bloquear"
+        justificacion = ("La regla administrada ya tiene el estado solicitado." if estado_actual == solicitado
+                         else "El estado observado de la regla difiere del solicitado.")
+        if estado_actual != solicitado and self.ajustes.max_herramientas_por_solicitud >= 3:
+            self._seleccionar_con_modelo(consulta, plan, datos)
         self._mostrar_vista_previa(plan)
-        self._anotar(consulta, intencion=intencion, plan=plan, nota="propuesta de bloqueo")
+        self._salida(f"  Diagnóstico: bloqueo configurado {'sí' if estado_actual else 'no'}. {justificacion}")
+        self._anotar(consulta, intencion=intencion, plan=plan, nota=f"propuesta de bloqueo: {justificacion}")
+        if estado_actual == solicitado:
+            texto = "La regla administrada ya tiene el estado solicitado; no se requiere cambio."
+            self._anotar(consulta, plan=plan, nota=texto)
+            return Respuesta(tipo=RESPUESTA_MODIFICACION, texto=texto, ok=True, resultado=previo.a_dict())
+        if self.ajustes.max_herramientas_por_solicitud < 3:
+            return self._respuesta_error(consulta, "limite_herramientas", "No quedan llamadas suficientes para ejecutar y verificar el cambio.", intencion=intencion)
 
         if not self._preguntar_aprobacion(plan):
             resultado = cancelar(plan)
@@ -601,7 +715,7 @@ class Cerebro:
             return self._respuesta_error(
                 consulta,
                 "ejecucion_fallida",
-                "La gestión de bloqueo no se pudo completar; no se informa como aplicada",
+                "La gestión de bloqueo no se pudo confirmar; el estado del equipo puede ser incierto.",
                 intencion=intencion,
                 resultado=resultado,
             )
@@ -613,6 +727,22 @@ class Cerebro:
                 intencion=intencion,
                 resultado=resultado,
             )
+
+        verificacion = ejecutar(lectura.accion, catalogo=self._catalogo, ajustes=self.ajustes)
+        self._anotar(consulta, plan=lectura, resultado=verificacion, nota="verificación independiente de bloqueo")
+        final = dict(verificacion.salida or {})
+        if (not verificacion.ok or final.get("origen") != plan.accion.argumentos["ip"]
+                or type(final.get("bloqueo_configurado")) is not bool
+                or final["bloqueo_configurado"] != solicitado
+                or type(final.get("regla_administrada_existente")) is not bool
+                or type(final.get("segura_para_modificar")) is not bool
+                or type(final.get("reglas_duplicadas")) is not bool
+                or final["reglas_duplicadas"]
+                or (solicitado and (not final["regla_administrada_existente"] or not final["segura_para_modificar"]))
+                or (not solicitado and final["regla_administrada_existente"])):
+            return self._respuesta_error(consulta, "verificacion_fallida",
+                "La lectura independiente no confirmó el estado solicitado; el estado del equipo puede ser incierto.",
+                intencion=intencion, resultado=verificacion)
 
         texto = self._formatear_resultado(plan, resultado)
         self._anotar(consulta, plan=plan, nota="verificación posterior confirmada")
@@ -724,6 +854,7 @@ class Cerebro:
                     "consulta_parcial",
                     "No se pudo completar el análisis de todos los equipos",
                 )
+            self._anotar(consulta, resultado=resultado_final, nota="respuesta de diagnóstico incompleto")
             return Respuesta(
                 tipo=RESPUESTA_ERROR,
                 texto="\n\n".join(bloques),
@@ -732,6 +863,7 @@ class Cerebro:
                 error=error_final,
             )
 
+        self._anotar(consulta, resultado=resultado_final, nota="respuesta de diagnóstico de solo lectura")
         return Respuesta(
             tipo=RESPUESTA_CONSULTA,
             texto="\n\n".join(bloques),
@@ -1308,7 +1440,7 @@ class Cerebro:
                             ok=False,
                             error=error_json("respuesta_invalida", texto),
                         )
-                    texto = intencion.mensaje or "No obtuve una respuesta del modelo."
+                    texto = _ocultar_secretos(intencion.mensaje) or "No obtuve una respuesta del modelo."
                     if ultimo_seguro is not None and not ultimo_seguro["ok"]:
                         texto = "No se pudo completar la última consulta de lectura."
                         self._anotar(consulta, intencion=intencion, nota=texto)
@@ -1353,6 +1485,7 @@ class Cerebro:
                     return Respuesta(tipo=RESPUESTA_MODIFICACION if estado_final else (RESPUESTA_CONSULTA if ultimo else RESPUESTA_MENSAJE),
                                      texto=texto, ok=True,
                                      resultado=ultimo.a_dict() if ultimo else None)
+                intencion = self._validar_intencion_cu02(consulta, intencion)
                 try:
                     plan = planificar(self.ajustes, intencion.herramienta, intencion.argumentos,
                                       catalogo=self._catalogo)
@@ -1431,8 +1564,10 @@ class Cerebro:
                     firma = json.dumps(dict(plan.accion.argumentos), sort_keys=True, ensure_ascii=False)
                     if firma in cambios_intentados:
                         return self._respuesta_error(consulta, "accion_repetida", "El cambio ya se intentó en esta solicitud")
-                    justificacion = "El comentario observado difiere del solicitado."
-                    self._salida(f"Vista previa de la modificación:\n  Equipo: {plan.accion.equipo}\n  Interfaz: {plan.accion.interfaz}\n  Comentario actual: «{anterior}»\n  Comentario nuevo: «{plan.accion.comentario}»\n  Justificación: {justificacion}")
+                    justificacion = ("El comentario observado ya coincide con el solicitado."
+                                     if anterior == plan.accion.comentario else
+                                     "El comentario observado difiere del solicitado.")
+                    self._mostrar_vista_previa_con_valor(plan, anterior)
                     self._anotar(consulta, intencion=intencion, plan=plan, nota=f"propuesta: anterior={anterior!r}; {justificacion}")
                     if anterior == plan.accion.comentario:
                         texto = f"El comentario de {plan.accion.interfaz} en {plan.accion.equipo} ya coincide; no se requiere cambio."
@@ -1538,6 +1673,7 @@ class Cerebro:
 
     def _atender_herramienta(self, consulta: str, intencion: Intencion) -> Respuesta:
         try:
+            intencion = self._validar_intencion_cu02(consulta, intencion)
             plan = planificar(
                 self.ajustes,
                 intencion.herramienta,
@@ -1628,8 +1764,10 @@ class Cerebro:
         if plan.herramienta == GESTIONAR_BLOQUEO:
             lineas = [
                 "Vista previa de la modificación (todavía no se envió nada al equipo):",
+                f"  Herramienta:       {plan.herramienta}",
                 f"  Equipo:            {vista.get('equipo', plan.accion.equipo)}",
-                f"  IP:                {argumentos.get('ip', '?')}",
+                f"  IP de origen:      {argumentos.get('ip', '?')}",
+                f"  Destino:           {self.ajustes.laboratorio.get('servidor_wan', '?')}",
                 f"  Acción:            {argumentos.get('accion', '?')}",
                 f"  Regla:             NETAGENT_LAB_{argumentos.get('ip', '?')}",
                 f"  Efecto:            {vista.get('efecto', 'solo la regla administrada de NetAgent-IA')}",
@@ -1639,6 +1777,7 @@ class Cerebro:
             return
         lineas = [
             "Vista previa de la modificación (todavía no se envió nada al equipo):",
+            f"  Herramienta:       {plan.herramienta}",
             f"  Equipo:            {vista.get('equipo', plan.accion.equipo)}",
             f"  Interfaz:          {argumentos.get('interfaz', '?')}",
             f"  Comentario nuevo:  «{argumentos.get('comentario', '')}»",
@@ -1652,10 +1791,13 @@ class Cerebro:
         argumentos = dict(plan.vista_previa.get("argumentos") or {})
         lineas = [
             "Vista previa de la modificación (todavía no se envió nada al equipo):",
+            f"  Herramienta:       {plan.herramienta}",
             f"  Equipo:            {plan.accion.equipo}",
             f"  Interfaz:          {plan.accion.interfaz}",
             f"  Comentario actual:  «{anterior}»",
             f"  Comentario nuevo:   «{argumentos.get('comentario', '')}»",
+            "  Justificación:     " + ("El comentario observado ya coincide con el solicitado."
+                if anterior == argumentos.get('comentario', '') else "El comentario observado difiere del solicitado."),
             "  Efecto:             solo se modificará la propiedad comment.",
         ]
         self._salida("\n".join(lineas))

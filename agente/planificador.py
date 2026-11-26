@@ -7,9 +7,8 @@ previa lista para mostrar. No abre conexiones, no escribe y no consulta a
 ningún modelo de IA; lo único que decide qué hacer es el llamador (hoy,
 pruebas; en la Etapa 4, :mod:`agente.cerebro`).
 
-La vista previa de una modificación **no** lee el comentario anterior: eso
-ocurre al ejecutar, con la sesión abierta y la aprobación ya otorgada. Así el
-plan se puede mostrar sin tocar el equipo y sin inventar datos.
+La planificación no abre conexiones. El controlador lee el estado antes de
+mostrar la propuesta y solicitar aprobación para una modificación.
 """
 
 from __future__ import annotations
@@ -34,17 +33,18 @@ _PASOS_LECTURA = (
 
 _PASOS_ESCRITURA = (
     "1. Comprobar equipo, interfaz y comentario contra config/dispositivos.yml.",
-    "2. Mostrar la vista previa y pedir aprobación humana explícita (s/N).",
-    "3. Leer el comentario actual para poder informar el valor anterior.",
+    "2. Leer el comentario actual con la herramienta de consulta.",
+    "3. Mostrar la propuesta y pedir aprobación humana explícita (s/N).",
     "4. Enviar solo el cambio de comentario, con confirmacion=True.",
     "5. Releer la interfaz; el cambio se informa como aplicado solo si coincide.",
 )
 
 _PASOS_GESTION_BLOQUEO = (
     "1. Comprobar R1, la IPv4 y la política LAN autorizada.",
-    "2. Mostrar la vista previa y pedir aprobación humana explícita (s/N).",
-    "3. Ejecutar la operación idempotente mediante Ansible.",
-    "4. Releer la regla administrada y verificar el estado real.",
+    "2. Consultar la regla administrada con la herramienta de lectura.",
+    "3. Mostrar la propuesta y pedir aprobación humana explícita (s/N).",
+    "4. Ejecutar la operación idempotente mediante Ansible.",
+    "5. Consultar de nuevo la regla con la herramienta de lectura.",
 )
 
 
@@ -99,7 +99,7 @@ def _vista_previa(accion: Accion) -> dict[str, Any]:
             {
                 "efecto": (
                     "Solo se modificará la regla administrada NETAGENT_LAB_ para "
-                    "la IP indicada en R1."
+                    "la IP indicada hacia 172.16.100.10 en R1."
                 ),
                 "nota": "La operación no se ejecuta sin aprobación humana explícita.",
             }

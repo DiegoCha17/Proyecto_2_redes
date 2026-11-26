@@ -29,5 +29,5 @@
 
 - name: Construir resultado estructurado
   ansible.builtin.set_fact:
-    netagent_resultado: "{{ netagent_bloque | netagent_procesar_bloqueo }}"
+    netagent_resultado: "{{ netagent_bloque | netagent_procesar_bloqueo(ip | default('192.168.10.50'), true) }}"
   no_log: true

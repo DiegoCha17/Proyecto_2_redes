@@ -3,9 +3,80 @@
 Agente de IA que administra una topología MikroTik simulada en GNS3 mediante un
 catálogo cerrado de herramientas, aprobación humana y verificación posterior.
 
-> **Estado actual:** el agente y dos herramientas Python están implementados.
-> Ollama local es el proveedor predeterminado; OpenAI sigue disponible. Los
-> playbooks Ansible de bloqueo y su integración están pendientes.
+> **Estado actual:** el catálogo integra lectura y cambio Python y Ansible.
+> Ollama local es el proveedor predeterminado; OpenAI sigue disponible.
+
+### Ciclo de los casos de uso
+
+* **CU-01:** la solicitud inicia una lectura del catálogo y el agente informa el
+  diagnóstico. Propuesta de cambio, confirmación y verificación posterior a un
+  cambio no aplican cuando la solicitud es exclusivamente de diagnóstico.
+* **CU-02:** el agente consulta la regla administrada de la IP solicitada, muestra
+  herramienta, parámetros y diagnóstico, pide aprobación si hay un cambio y
+  ejecuta el playbook idempotente. Después usa de nuevo `consultar_bloqueo` para
+  verificar el resultado. La lectura confirma configuración, no tráfico efectivo.
+* **CU-03:** el agente lee el comentario, muestra la propuesta y solicita
+  aprobación si difiere. Tras el cambio, `consultar_interfaces` verifica el
+  comentario. Si ya coincide, no se requiere aprobación ni escritura.
+
+En las órdenes explícitas de cambio se solicita al modelo una propuesta por
+function calling después del diagnóstico. Solo se acepta si coincide con la
+solicitud y las políticas; si falla o no coincide, el respaldo determinista se
+registra como tal. Algunas consultas y rutas de reconocimiento también son
+deterministas: no constituyen evidencia de selección por function calling. Los
+eventos JSON registran diagnóstico, propuesta, confirmación, ejecución y
+verificación, con datos sensibles saneados. El estado real puede cambiar entre
+lecturas; la confirmación independiente no prueba tráfico extremo a extremo.
+
+### Credenciales con Ansible Vault
+
+El inventario y `group_vars/mikrotik.yml` conservan su formato: Ansible y las
+herramientas Python leen las mismas variables `NETAGENT_R1_*` y `NETAGENT_SW1_*`.
+Sin Vault funciona el entorno o `.env` habitual. Para utilizar Vault, el
+lanzador descifra el archivo en memoria y reemplaza las cuatro variables en el
+entorno del proceso hijo. Así Vault es la fuente efectiva para **ambos** tipos
+de herramienta durante esa ejecución; no se mezclan usuarios o contraseñas de
+Vault con los del entorno. No se escriben credenciales descifradas en el
+repositorio ni se pasan como argumentos de línea de comandos.
+
+Desde Fedora, en la raíz del proyecto, configure `ANSIBLE_VAULT_PASSWORD_FILE`
+con la ruta **externa al repositorio** del archivo de contraseña maestra que ya
+utiliza. No lo sobrescriba ni vuelva a crearlo si ya existe. Para un Vault nuevo,
+cree previamente ese archivo privado con los medios seguros de su entorno.
+
+Para crear o reconstruir `vault.yml` sin abrir un editor, ejecute:
+
+```bash
+.venv/bin/python scripts/configurar_vault.py
+```
+
+El configurador pide el usuario y la contraseña de R1 y SW1 dos veces, sin
+mostrarlos; escriba las credenciales SSH actuales, no la contraseña maestra de
+Vault. Cifra el YAML desde memoria y verifica los cuatro valores mediante el
+mismo lanzador que usa el agente. Antes de sustituir un Vault existente, crea
+una copia cifrada `vault.yml.bak-...` con permisos privados. Si falla la
+verificación, conserva el original. No cambia contraseñas en los equipos ni
+comprueba por sí mismo si las contraseñas introducidas son correctas en SSH.
+No se puede detectar que una contraseña equivocada se haya introducido dos
+veces de la misma manera; la consulta de lectura siguiente comprueba el acceso.
+
+Para comprobar exclusivamente la autenticación de R1 con una lectura:
+
+```bash
+.venv/bin/python scripts/ejecutar_con_vault.py -- ansible r1 -i ansible/inventario.ini -m community.routeros.command -a '{"commands":["/system identity print"]}'
+```
+
+Para iniciar el agente después de configurar Vault:
+
+```bash
+.venv/bin/python scripts/ejecutar_con_vault.py -- .venv/bin/python main.py
+```
+
+Los archivos `.yml` y `.yaml`, respaldos y temporales de `ansible/vault/` están
+ignorados por Git, incluso cuando están cifrados. Mantenga la contraseña maestra
+fuera del repositorio. No imprima la salida de `ansible-vault view` ni ejecute
+programas no confiables mediante el lanzador: el proceso hijo necesita las
+credenciales en su entorno para conectarse.
 
 ---
 
@@ -162,14 +233,14 @@ RouterOS repinta el eco y reimprime el prompt, así que la parada por patrón de
 prompt podía devolver el control con el prompt previo a la ejecución y una
 salida vacía, ocultando la respuesta real del equipo.
 
-**`tests/`** — pruebas con `unittest` (sin dependencias nuevas). Simulan las
+**`tests/`** — pruebas con `pytest` y `unittest`. Simulan las
 salidas de RouterOS y la sesión Netmiko con `unittest.mock`; no abren SSH ni
 requieren GNS3. La sesión simulada de actualización sigue el guion lectura →
 modificación → relectura, y también cubre fallos de conexión, de modificación y
 de verificación.
 
 **`registros/`** — evidencia de ejecución. Los archivos se ignoran en Git salvo
-`.gitkeep`; el agente (Etapa 4) guardará aquí un JSON por sesión.
+`.gitkeep`; el agente guarda aquí un JSON por sesión.
 
 ---
 
@@ -190,7 +261,7 @@ de verificación.
 Ansible se usa desde el sistema (no por pip). Si faltara alguna colección:
 
 ```bash
-ansible-galaxy collection install ansible.netcommon community.routeros
+ansible-galaxy collection install ansible.netcommon community.routeros ansible.posix
 ```
 
 ---
@@ -204,6 +275,7 @@ cd ~/P2_Final_Grupo6
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt   # opcional: ya están disponibles
+python -m pip install pytest pytest-subtests  # pruebas completas
 
 # 2) Credenciales y API key (nunca se versionan)
 cp .env.example .env
@@ -216,8 +288,8 @@ python scripts/generar_inventario.py
 # 4) Verificación del entorno
 python scripts/verificar_entorno.py
 
-# 5) Pruebas unitarias (sin SSH ni GNS3)
-python -m unittest discover -s tests -v
+# 5) Suite completa (sin SSH ni GNS3)
+python -m pytest -q
 ```
 
 Para trabajar en una shell con todo cargado:
@@ -284,8 +356,8 @@ y devuelve el diagnóstico para que el modelo vuelva a decidir. Si el comentario
 ya coincide, no escribe; en caso contrario muestra los valores anterior y nuevo
 y requiere aprobación explícita. Después de ejecutar, una segunda lectura
 independiente confirma el resultado. El límite reserva espacio para la escritura
-y su verificación; una falla se informa como estado incierto. Solo R1/ether4
-admite cambios y no hay integración de los playbooks Ansible todavía.
+y su verificación; una falla se informa como estado incierto. Las interfaces
+autorizadas se definen en `config/dispositivos.yml`; CU-02 utiliza Ansible.
 
 Para una demostración supervisada, solicite por ejemplo `Cambia el comentario
 de ether4 de R1 a P2-NetAgent-IA-Demo`, revise la vista previa y responda `s`
@@ -420,6 +492,9 @@ Salida de un cambio confirmado y verificado:
 
 ### Pruebas ejecutadas
 
+Los resultados de esta sección son históricos; ejecute la suite completa con
+`python -m pytest -q` para conocer el estado actual.
+
 ```text
 python -m compileall -q herramientas tests config scripts   -> OK
 python -m unittest discover -s tests -v                     -> 70 pruebas, OK
@@ -448,7 +523,11 @@ escritura → relectura, la detección de rechazos de RouterOS, el recorte de
   estaba detenida. El comportamiento de red se probó con dobles de prueba;
   queda pendiente la prueba de integración con R1 y SW1 encendidos.
 
-## 7. Etapas siguientes (no implementadas aún)
+## 7. Notas históricas de las etapas de desarrollo
+
+La descripción siguiente conserva el contexto de etapas anteriores y puede
+contener planes y limitaciones ya superados. El estado vigente se resume al
+principio de este documento y debe contrastarse con el catálogo y las políticas.
 
 ### Etapa 2 — Prueba de integración pendiente
 

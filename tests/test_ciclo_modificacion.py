@@ -84,6 +84,18 @@ class PruebaCicloModificacion(unittest.TestCase):
         self.assertTrue(any("aprobación explícita" in n for n in notas))
         self.assertTrue(any("verificación independiente" in n for n in notas))
 
+    def test_escritura_explicita_selecciona_una_vez_con_diagnostico(self):
+        from agente.interpretar import SolicitudComentario
+        cerebro, proveedor, registro = self.construir([proponer()])
+        resultado = cerebro._atender_escritura_explicita(
+            'Cambia el comentario de ether4 en R1 a nuevo',
+            SolicitudComentario('r1', 'ether4', 'nuevo'))
+        self.assertTrue(resultado.ok)
+        self.assertEqual(len(proveedor.peticiones), 1)
+        self.assertIn('anterior', proveedor.peticiones[0][1]['content'])
+        self.assertTrue(any(e.get('nota') == 'selección mediante function calling' for e in registro.eventos))
+        self.assertEqual(self.lecturas, 2)
+
     def test_cambio_directo_primero_diagnostica_y_vuelve_a_preguntar_al_modelo(self):
         cerebro, proveedor, _ = self.construir([proponer("primera"), proponer("segunda"), RespuestaModelo(texto="ok")])
         self.assertTrue(cerebro.procesar("Cambia el comentario").ok)
@@ -174,6 +186,8 @@ class PruebaCicloModificacion(unittest.TestCase):
         self.assertIn("ya coincide", respuesta.texto)
         self.assertEqual(self.escrituras, [])
         self.assertEqual(self.preguntas, [])
+        self.assertTrue(any('ya coincide' in v and 'actualizar_comentario' in v for v in self.vistas))
+        self.assertFalse(any('difiere del solicitado' in v for v in self.vistas))
 
     def test_verificacion_independiente_fallida_no_informa_exito(self):
         self.no_aplicar = True

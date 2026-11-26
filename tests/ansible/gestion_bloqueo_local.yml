@@ -1,0 +1,17 @@
+---
+- name: Probar validación de gestión sin red
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Simular lectura de RouterOS
+      ansible.builtin.set_fact:
+        pre_lectura:
+          stdout_lines: "{{ stdout_simulado | default([salida_simulada.splitlines()]) }}"
+    - name: Procesar prelectura real
+      ansible.builtin.include_tasks: ../../ansible/tareas/procesar_gestion_bloqueo.yml
+      vars:
+        netagent_fase: pre
+    - name: Exponer estado validado
+      ansible.builtin.debug:
+        var: bloqueada_antes

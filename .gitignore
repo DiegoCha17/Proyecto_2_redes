@@ -18,6 +18,15 @@ registros/*
 *.retry
 .ansible/
 ansible/inventario.ini.bak
+ansible/vault/vault.yml
+ansible/vault/vault.yml.*
+ansible/vault/*.yml
+ansible/vault/*.yaml
+ansible/vault/*.yml.*
+ansible/vault/*.yaml.*
+ansible/vault/.vault-config-*/
+.vault-pass
+.vault_password
 
 # --- Editores ---
 .vscode/

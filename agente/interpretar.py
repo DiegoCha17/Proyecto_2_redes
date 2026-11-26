@@ -185,6 +185,49 @@ def _texto_sin_acentos(texto: str) -> str:
     return "".join(caracter for caracter in normalizado if unicodedata.category(caracter) != "Mn")
 
 
+def extraer_solicitud_bloqueo(mensaje: str, *, ip_pc1: str | None = None) -> dict[str, str] | None:
+    """Reconoce únicamente órdenes completas y sin condiciones de CU-02."""
+    if not isinstance(mensaje, str):
+        return None
+    texto = _texto_sin_acentos(mensaje.strip())
+    ip = r"(?:\d{1,3}\.){3}\d{1,3}"
+    tecnico = re.fullmatch(
+        rf"usa gestionar_bloqueo con equipo (r1), ip ({ip}) y accion (bloquear|permitir)\.?"
+        r"(?:\s+solicita mi aprobacion antes de ejecutar\.?)?", texto)
+    if tecnico:
+        return {"equipo": tecnico[1], "ip": tecnico[2], "accion": tecnico[3]}
+    # PC1 se resuelve con el inventario; CU-02 tiene como único equipo R1 y
+    # como destino el servidor WAN. La vista previa muestra ese alcance.
+    if isinstance(ip_pc1, str) and re.fullmatch(ip, ip_pc1):
+        bloqueo = re.fullmatch(
+            r"(?:bloquea|bloquear)\s+(?:el acceso de\s+)?pc1"
+            r"(?:\s+en\s+r1\s+(?:hacia el|hacia|al)\s+servidor-wan(?:\s*\(172\.16\.100\.10\))?"
+            r"|\s+(?:hacia el|hacia|al)\s+servidor-wan(?:\s*\(172\.16\.100\.10\))?\s+en\s+r1)"
+            r"\s*[.!]?", texto)
+        if bloqueo:
+            return {"equipo": "r1", "ip": ip_pc1, "accion": "bloquear"}
+        alias = re.fullmatch(
+            r"(?:desbloquea|desbloquear|permite(?: nuevamente)?(?: el acceso de)?|quita el bloqueo de)\s+pc1"
+            r"(?:\s+(?:al|hacia el|hacia|para que vuelva a acceder al)\s+servidor-wan(?:\s*\(172\.16\.100\.10\))?)?"
+            r"(?:\s+en\s+r1)?\s*[.!]?", texto)
+        if alias:
+            return {"equipo": "r1", "ip": ip_pc1, "accion": "permitir"}
+    natural = re.fullmatch(
+        rf"(bloquea|bloquear|desbloquea|desbloquear|permite|permitir|quita el bloqueo de)\s+"
+        rf"(?:nuevamente\s+)?(?:el acceso de\s+)?(?:pc1\s*\((?P<ip_pc>{ip})\)|(?P<ip_sola>{ip}))"
+        r"(?:\s+(?:al|hacia el|hacia|para que vuelva a acceder al)\s+servidor-wan(?:\s*\(172\.16\.100\.10\))?)?"
+        r"\s+en\s+(r1)\s*[.!]?", texto)
+    if not natural:
+        return None
+    verbo = natural.group(1)
+    origen = natural.group("ip_pc") or natural.group("ip_sola")
+    if natural.group("ip_pc") and (not ip_pc1 or origen != ip_pc1):
+        return None
+    equipo = natural.group(4)
+    return {"equipo": equipo, "ip": origen,
+            "accion": "bloquear" if verbo in {"bloquea", "bloquear"} else "permitir"}
+
+
 def extraer_filtro_interfaces_estado(mensaje: str) -> FiltroInterfacesEstado | None:
     """Reconoce consultas explícitas de interfaces filtradas por estado.
 
@@ -228,6 +271,8 @@ def extraer_solicitud_comentario(mensaje: str) -> SolicitudComentario | None:
     """
     if not isinstance(mensaje, str):
         return None
+    if es_negacion_comentario(mensaje):
+        return None
     coincidencia = re.search(
         r"\b(?:cambia|cambiar|cambie|modifica|modificar|modifique|"
         r"actualiza|actualizar|actualice)\s+el\s+comentario\s+"
@@ -246,6 +291,14 @@ def extraer_solicitud_comentario(mensaje: str) -> SolicitudComentario | None:
         interfaz=coincidencia.group(1),
         comentario=comentario,
     )
+
+
+def es_negacion_comentario(mensaje: str) -> bool:
+    """Detecta una negación explícita antes de consultar al modelo."""
+    return bool(re.search(
+        r"\bno\s+(?:cambies|cambia|cambiar|modifiques|modifica|modificar|"
+        r"actualices|actualiza|actualizar)\s+el\s+comentario\b",
+        mensaje, re.IGNORECASE)) if isinstance(mensaje, str) else False
 
 
 def es_consulta_inventario(mensaje: str) -> bool:

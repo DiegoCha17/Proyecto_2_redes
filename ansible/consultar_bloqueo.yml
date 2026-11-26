@@ -2,11 +2,19 @@
 - name: Consultar regla de NetAgent-IA en R1
   hosts: r1
   gather_facts: false
+  vars:
+    ip: "192.168.10.50"
   tasks:
+    - name: Validar IP de consulta
+      ansible.builtin.assert:
+        that:
+          - ip is string
+          - ip is match('^192\.168\.10\.(0|[2-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$')
+      no_log: true
     - name: Leer únicamente reglas con el identificador del proyecto
       community.routeros.command:
         commands:
-          - ':put "NETAGENT_BEGIN_V1"; :foreach regla in=[/ip firewall filter print as-value where comment="NetAgent-IA:CU02:PC1-WAN"] do={ :put "NETAGENT_RULE_BEGIN_V2"; :foreach clave,valor in=$regla do={ :put ("NETAGENT_PROP|" . $clave . "|" . [:tostr $valor]) }; :put "NETAGENT_RULE_END_V2" }; :put "NETAGENT_END_V1"'
+          - ':put "NETAGENT_BEGIN_V1"; :foreach regla in=[/ip firewall filter print as-value where comment="NETAGENT_LAB_{{ ip }}"] do={ :put "NETAGENT_RULE_BEGIN_V2"; :foreach clave,valor in=$regla do={ :put ("NETAGENT_PROP|" . $clave . "|" . [:tostr $valor]) }; :local id ($regla->".id"); :put ("NETAGENT_DISABLED|" . [:tostr $id] . "|" . [:tostr [/ip firewall filter get $id disabled]]); :put "NETAGENT_RULE_END_V2" }; {% if ip == "192.168.10.50" %}:foreach regla in=[/ip firewall filter print as-value where comment="NetAgent-IA:CU02:PC1-WAN"] do={ :put "NETAGENT_RULE_BEGIN_V2"; :foreach clave,valor in=$regla do={ :put ("NETAGENT_PROP|" . $clave . "|" . [:tostr $valor]) }; :local id ($regla->".id"); :put ("NETAGENT_DISABLED|" . [:tostr $id] . "|" . [:tostr [/ip firewall filter get $id disabled]]); :put "NETAGENT_RULE_END_V2" }; {% endif %}:put "NETAGENT_END_V1"'
       register: netagent_consulta
       changed_when: false
       no_log: true

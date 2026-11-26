@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agente.catalogo import GESTIONAR_BLOQUEO, Catalogo, Herramienta, catalogo_por_defecto
+from agente.catalogo import CONSULTAR_BLOQUEO, GESTIONAR_BLOQUEO, Catalogo, Herramienta, catalogo_por_defecto
 from agente.cerebro import Cerebro, RegistroSesion
 from agente.ejecutar import aprobar, ejecutar
 from agente.interpretar import Intencion, TIPO_HERRAMIENTA
@@ -44,9 +44,20 @@ class FuncionGestion:
         }
 
 
-def catalogo_con(funcion):
-    real = catalogo_por_defecto().obtener(GESTIONAR_BLOQUEO)
-    return Catalogo([Herramienta(real.definicion, funcion)])
+def catalogo_con(funcion, *, bloqueada=False):
+    real = catalogo_por_defecto()
+    estado = [bloqueada]
+    def leer(equipo, ip=None, ajustes=None):
+        return {'ok': True, 'equipo': 'R1', 'origen': ip or '192.168.10.50',
+                'bloqueo_configurado': estado[0], 'regla_administrada_existente': estado[0],
+                'segura_para_modificar': estado[0], 'reglas_duplicadas': False, 'error': None}
+    def escribir(**kwargs):
+        salida = funcion(**kwargs)
+        if salida.get('ok') and salida.get('verified'):
+            estado[0] = salida['bloqueada']
+        return salida
+    return Catalogo([Herramienta(real.obtener(CONSULTAR_BLOQUEO).definicion, leer),
+                     Herramienta(real.obtener(GESTIONAR_BLOQUEO).definicion, escribir)])
 
 
 def test_sin_aprobacion_no_ejecuta():
@@ -145,4 +156,3 @@ def test_cerebro_rechaza_y_no_ejecuta_si_operador_no_aprueba():
 
     assert respuesta.tipo == "cancelado"
     assert funcion.llamadas == []
-

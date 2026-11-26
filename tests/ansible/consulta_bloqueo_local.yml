@@ -4,6 +4,11 @@
   connection: local
   gather_facts: false
   tasks:
+    - name: Registrar secreto sintético para la prueba de redacción
+      ansible.builtin.set_fact:
+        secreto_sintetico: "{{ 'admin' | ansible.builtin.register_secret }}"
+      when: probar_redaccion | default(false)
+      no_log: true
     - name: Simular salida de RouterOS
       ansible.builtin.set_fact:
         netagent_consulta:
@@ -12,6 +17,11 @@
     - name: Ejecutar el procesamiento real
       ansible.builtin.include_tasks: ../../ansible/tareas/procesar_bloqueo.yml
       no_log: true
+    - name: Comprobar el dato interno antes de la presentación
+      ansible.builtin.assert:
+        that:
+          - netagent_resultado.regla_administrada_existente == netagent_resultado.existe
+      when: probar_redaccion | default(false)
     - name: Resultado JSON de NetAgent-IA
       ansible.builtin.debug:
         var: netagent_resultado

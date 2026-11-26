@@ -15,7 +15,7 @@ PLAYBOOK = RAIZ / "tests/ansible/consulta_bloqueo_local.yml"
 
 @unittest.skipUnless(shutil.which("ansible-playbook"), "Ansible no está instalado")
 class PruebaConsultaBloqueo(unittest.TestCase):
-    def ejecutar_consulta(self, lineas):
+    def ejecutar_consulta(self, lineas, probar_redaccion=False):
         with tempfile.TemporaryDirectory() as temporal:
             entorno = os.environ.copy()
             entorno.update({
@@ -27,7 +27,7 @@ class PruebaConsultaBloqueo(unittest.TestCase):
             })
             return subprocess.run(
                 ["ansible-playbook", "-i", "localhost,", str(PLAYBOOK),
-                 "-e", json.dumps({"salida_simulada": "\n".join(lineas)})],
+                 "-e", json.dumps({"salida_simulada": "\n".join(lineas), "probar_redaccion": probar_redaccion})],
                 cwd=RAIZ, env=entorno, capture_output=True, text=True, timeout=45,
             )
 
@@ -49,26 +49,37 @@ class PruebaConsultaBloqueo(unittest.TestCase):
         self.assertIsNone(resultado["bloqueo_efectivo"])
         self.assertFalse(resultado["changed"])
 
+    def test_redaccion_real_preserva_alias_y_dato_interno(self):
+        proceso = self.ejecutar_consulta(['NETAGENT_BEGIN_V1', 'NETAGENT_END_V1'], probar_redaccion=True)
+        self.assertEqual(proceso.returncode, 0, proceso.stderr + proceso.stdout)
+        salida = json.loads(proceso.stdout)
+        resultados = [host['netagent_resultado'] for play in salida['plays']
+                      for task in play['tasks'] for host in task.get('hosts', {}).values()
+                      if 'netagent_resultado' in host]
+        self.assertEqual(len(resultados), 1)
+        self.assertFalse(resultados[0]['existe'])
+        self.assertIn('regla_$REDACTED$istrada_existente', resultados[0])
+
     def test_existente_habilitada(self):
-        resultado = self.procesar(["NETAGENT_RULE|forward|drop|192.168.10.50/32|172.16.100.10/32|false"])
+        resultado = self.procesar(self.regla_v2())
         self.assertTrue(resultado["bloqueo_configurado"])
         self.assertTrue(resultado["reglas"][0]["habilitada"])
         self.assertIsNone(resultado["bloqueo_efectivo"])
 
     def test_deshabilitada(self):
-        resultado = self.procesar(["NETAGENT_RULE|forward|drop|192.168.10.50|172.16.100.10|true"])
+        resultado = self.procesar([s.replace('|false', '|true') for s in self.regla_v2()])
         self.assertTrue(resultado["regla_administrada_existente"])
         self.assertFalse(resultado["bloqueo_configurado"])
         self.assertFalse(resultado["reglas"][0]["habilitada"])
 
     def test_no_coincidente(self):
-        resultado = self.procesar(["NETAGENT_RULE|forward|drop|192.168.10.60|172.16.100.10|no"])
+        resultado = self.procesar([s.replace('192.168.10.50/32', '192.168.10.60') for s in self.regla_v2()])
         self.assertTrue(resultado["regla_administrada_existente"])
         self.assertFalse(resultado["bloqueo_configurado"])
         self.assertFalse(resultado["reglas"][0]["coincide_objetivo"])
 
     def test_accion_no_coincidente(self):
-        resultado = self.procesar(["NETAGENT_RULE|forward|accept|192.168.10.50|172.16.100.10|no"])
+        resultado = self.procesar([s.replace('NETAGENT_PROP|action|drop', 'NETAGENT_PROP|action|accept') for s in self.regla_v2()])
         self.assertFalse(resultado["bloqueo_configurado"])
 
     def test_salida_incompleta_falla_cerrada(self):
@@ -86,7 +97,7 @@ class PruebaConsultaBloqueo(unittest.TestCase):
             '<IN_V1', '< filter find where comment="NetAgent-IA:CU02:PC1-WAN"]',
             '< firewall filter get $regla disabled]) }; :put "NETAGENT_END_V1"',
             'NETAGENT_BEGIN_V1',
-            'NETAGENT_RULE|forward|drop|192.168.10.50|172.16.100.10|false',
+            *self.regla_v2(),
             'NETAGENT_END_V1',
         ])
         self.assertEqual(proceso.returncode, 0, proceso.stderr + proceso.stdout)
@@ -119,8 +130,9 @@ class PruebaConsultaBloqueo(unittest.TestCase):
     def regla_v2(self, adicionales=()):
         props = [('.id', '*A'), ('chain', 'forward'), ('action', 'drop'),
                  ('src-address', '192.168.10.50/32'), ('dst-address', '172.16.100.10/32'),
-                 ('disabled', 'false'), ('comment', 'NetAgent-IA:CU02:PC1-WAN')]
+                 ('disabled', 'false'), ('comment', 'NETAGENT_LAB_192.168.10.50')]
         return ['NETAGENT_RULE_BEGIN_V2', *['NETAGENT_PROP|%s|%s' % p for p in props + list(adicionales)],
+                'NETAGENT_DISABLED|*A|false',
                 'NETAGENT_RULE_END_V2']
 
     def test_regla_completa_valida(self):
@@ -136,14 +148,12 @@ class PruebaConsultaBloqueo(unittest.TestCase):
                 self.assertIn(campo, r['reglas'][0]['propiedades_inesperadas'])
 
     def test_reglas_duplicadas_bloquean_administracion(self):
-        r = self.procesar(self.regla_v2() + self.regla_v2())
-        self.assertTrue(r['reglas_duplicadas'])
-        self.assertFalse(r['segura_para_modificar'])
+        p = self.ejecutar_consulta(['NETAGENT_BEGIN_V1', *self.regla_v2(), *self.regla_v2(), 'NETAGENT_END_V1'])
+        self.assertNotEqual(p.returncode, 0)
 
     def test_formato_anterior_no_autoriza_administracion(self):
-        r = self.procesar(['NETAGENT_RULE|forward|drop|192.168.10.50|172.16.100.10|false'])
-        self.assertFalse(r['segura_para_modificar'])
-        self.assertFalse(r['reglas'][0]['inspeccion_completa'])
+        proceso = self.ejecutar_consulta(['NETAGENT_BEGIN_V1', 'NETAGENT_RULE|forward|drop|192.168.10.50|172.16.100.10|false', 'NETAGENT_END_V1'])
+        self.assertNotEqual(proceso.returncode, 0)
 
     def test_propiedad_duplicada_o_regla_incompleta_falla(self):
         for reglas in (self.regla_v2([('chain', 'forward')]), self.regla_v2()[:-1]):
